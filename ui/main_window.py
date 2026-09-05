@@ -17,6 +17,12 @@ Mejoras respecto a la versión anterior:
     de la GUI (seguro entre hilos).
   - Optimización: no se convierten frames a QImage si el video no es visible.
   - Al cerrar se detiene el reproductor y se cancelan miniaturas pendientes.
+  - Pantalla dividida: un panel de video (izquierda) y un panel de imagen
+    (derecha) visibles y manipulables SIMULTÁNEA e INDEPENDIENTEMENTE.
+    El panel de imagen reutiliza DirectVideoWidget (misma lógica de
+    rotación/zoom/paneo/relleno) y mantiene su propia lista de fotos,
+    índice de navegación, rotación y zoom, totalmente separados del
+    estado del reproductor de video.
 """
 from __future__ import annotations
 
@@ -24,7 +30,7 @@ import logging
 import os
 
 from PyQt6.QtCore import QSize, Qt, QTimer, QThreadPool, QUrl
-from PyQt6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
+from PyQt6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -62,6 +68,20 @@ VIDEO_EXTENSIONS = {
     ".mpeg",
     ".ogv",
 }
+
+IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".gif",
+    ".webp",
+    ".tif",
+    ".tiff",
+    ".ico",
+}
+
+IMAGE_PLACEHOLDER_TEXT = "Sin imagen cargada\nUsa 'Cargar imágenes' o arrástralas aquí"
 
 # Tiempo sin mover el ratón antes de ocultar los controles en fullscreen.
 AUTOHIDE_CONTROLS_MS = 2500
@@ -133,6 +153,14 @@ class ModernVideoPlayer(QMainWindow):
         self.loop_video = self.settings.loop()
         self.items_map = {}
 
+        # Estado del panel de imagen (pantalla dividida), completamente
+        # independiente del estado del reproductor de video de arriba.
+        self.split_mode = self.settings.split_mode()
+        self.image_paths: list[str] = []
+        self.image_index = -1
+        self.image_rotation = 0
+        self.image_zoom = 1.0
+
         self.init_player()
         self.init_ui()
         self.setup_shortcuts()
@@ -143,6 +171,7 @@ class ModernVideoPlayer(QMainWindow):
 
         self.restore_window_state()
         self.restore_playlist()
+        self.restore_images()
 
         if initial_files:
             self.add_paths(initial_files, autoplay=True)
@@ -207,11 +236,39 @@ class ModernVideoPlayer(QMainWindow):
         )
 
     def _build_left_panel(self) -> QWidget:
-        """Panel izquierdo: área de video + controles inferiores."""
+        """Área de medios: splitter interno con el panel de video y,
+        opcionalmente, el panel de imagen en modo pantalla dividida.
+
+        Ambos paneles conviven en `self.media_splitter`. El de video
+        siempre está visible; el de imagen se muestra u oculta según
+        `self.split_mode` (ver toggle_split_mode). Cada uno construye y
+        controla sus propios widgets, así que se pueden manipular por
+        completo por separado (cambiar de video no afecta a la imagen
+        mostrada y viceversa).
+        """
         left_box = QWidget()
         left_layout = QVBoxLayout(left_box)
         left_layout.setContentsMargins(12, 12, 8, 12)
         left_layout.setSpacing(10)
+
+        self.media_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.media_splitter.addWidget(self._build_video_panel())
+        self.media_splitter.addWidget(self._build_image_panel())
+        self.media_splitter.setSizes([1, 1])
+        left_layout.addWidget(self.media_splitter, stretch=1)
+
+        # La pantalla dividida es opcional: el panel de imagen arranca
+        # oculto salvo que el usuario la haya dejado activada la última vez.
+        self.image_panel.setVisible(self.split_mode)
+
+        return left_box
+
+    def _build_video_panel(self) -> QWidget:
+        """Panel de video: área de reproducción + controles inferiores."""
+        video_box = QWidget()
+        video_layout = QVBoxLayout(video_box)
+        video_layout.setContentsMargins(0, 0, 0, 0)
+        video_layout.setSpacing(10)
 
         self.video_view = DirectVideoWidget()
         self.video_view.doubleClicked.connect(self.toggle_fullscreen)
@@ -219,7 +276,7 @@ class ModernVideoPlayer(QMainWindow):
         self.video_view.wheelScrolled.connect(self.adjust_volume)
         self.video_view.zoomScrolled.connect(self.adjust_zoom)
         self.video_view.mouseMoved.connect(self.on_video_mouse_moved)
-        left_layout.addWidget(self.video_view, stretch=1)
+        video_layout.addWidget(self.video_view, stretch=1)
 
         # Contenedor de controles inferiores: se oculta junto con el panel
         # lateral cuando se entra en pantalla completa.
@@ -232,8 +289,133 @@ class ModernVideoPlayer(QMainWindow):
         controls_layout.addLayout(self._build_rotation_zoom_speed_row())
 
         self.controls_panel = controls_panel
-        left_layout.addWidget(self.controls_panel)
-        return left_box
+        video_layout.addWidget(self.controls_panel)
+        return video_box
+
+    def _build_image_panel(self) -> QWidget:
+        """Panel de imagen: visor + controles, independiente del video.
+
+        Reutiliza DirectVideoWidget (soporta rotación/zoom/paneo/relleno
+        para cualquier QImage, sea un frame de video o una foto) en vez
+        de duplicar esa lógica de pintado en una clase nueva.
+        """
+        image_box = QWidget()
+        image_layout = QVBoxLayout(image_box)
+        image_layout.setContentsMargins(0, 0, 0, 0)
+        image_layout.setSpacing(10)
+
+        self.image_view = DirectVideoWidget(placeholder_text=IMAGE_PLACEHOLDER_TEXT)
+        self.image_view.zoomScrolled.connect(self.adjust_image_zoom)
+        # A diferencia del video, aquí no hay volumen que ajustar con la
+        # rueda normal: se reutiliza también para zoom (sin necesitar Ctrl).
+        self.image_view.wheelScrolled.connect(
+            lambda delta: self.adjust_image_zoom(1 if delta > 0 else -1)
+        )
+        image_layout.addWidget(self.image_view, stretch=1)
+
+        image_layout.addLayout(self._build_image_nav_row())
+        image_layout.addLayout(self._build_image_transform_row())
+
+        self.image_panel = image_box
+        return image_box
+
+    def _build_image_nav_row(self) -> QHBoxLayout:
+        """Fila 1 del panel de imagen: cargar y navegar entre fotos."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        btn_add_img = QPushButton("+  Cargar imágenes")
+        btn_add_img.setObjectName("primaryBtn")
+        btn_add_img.clicked.connect(self.open_image_dialog)
+        row.addWidget(btn_add_img)
+
+        row.addSpacing(6)
+
+        self.btn_img_prev = QPushButton("⏮")
+        self.btn_img_prev.setObjectName("transportBtn")
+        self.btn_img_prev.setToolTip("Imagen anterior (,)")
+        self.btn_img_prev.clicked.connect(self.show_previous_image)
+        row.addWidget(self.btn_img_prev)
+
+        self.lbl_img_counter = QLabel("0 / 0")
+        self.lbl_img_counter.setObjectName("statLabel")
+        row.addWidget(self.lbl_img_counter)
+
+        self.btn_img_next = QPushButton("⏭")
+        self.btn_img_next.setObjectName("transportBtn")
+        self.btn_img_next.setToolTip("Siguiente imagen (.)")
+        self.btn_img_next.clicked.connect(self.show_next_image)
+        row.addWidget(self.btn_img_next)
+
+        row.addStretch()
+
+        btn_img_remove = QPushButton("Quitar")
+        btn_img_remove.setObjectName("dangerBtn")
+        btn_img_remove.setToolTip("Quitar la imagen actual de la lista")
+        btn_img_remove.clicked.connect(self.remove_current_image)
+        row.addWidget(btn_img_remove)
+
+        return row
+
+    def _build_image_transform_row(self) -> QHBoxLayout:
+        """Fila 2 del panel de imagen: giro, zoom y relleno."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        cap_giro = QLabel("Giro")
+        cap_giro.setObjectName("groupCaption")
+        row.addWidget(cap_giro)
+
+        btn_img_ccw = QPushButton("↺")
+        btn_img_ccw.setToolTip("Girar antihorario (Alt+Shift+R)")
+        btn_img_ccw.clicked.connect(lambda: self.rotate_image(-90))
+        row.addWidget(btn_img_ccw)
+
+        btn_img_cw = QPushButton("↻")
+        btn_img_cw.setToolTip("Girar horario (Alt+R)")
+        btn_img_cw.clicked.connect(lambda: self.rotate_image(90))
+        row.addWidget(btn_img_cw)
+
+        self.lbl_img_rot = QLabel("0°")
+        self.lbl_img_rot.setObjectName("statLabel")
+        row.addWidget(self.lbl_img_rot)
+
+        row.addSpacing(12)
+
+        cap_zoom = QLabel("Zoom")
+        cap_zoom.setObjectName("groupCaption")
+        row.addWidget(cap_zoom)
+
+        btn_img_zoom_out = QPushButton("−")
+        btn_img_zoom_out.setToolTip("Alejar (Ctrl + Rueda abajo sobre la imagen / Alt+-)")
+        btn_img_zoom_out.clicked.connect(lambda: self.adjust_image_zoom(-1))
+        row.addWidget(btn_img_zoom_out)
+
+        self.lbl_img_zoom = QLabel("100%")
+        self.lbl_img_zoom.setObjectName("statLabel")
+        row.addWidget(self.lbl_img_zoom)
+
+        btn_img_zoom_in = QPushButton("+")
+        btn_img_zoom_in.setToolTip("Acercar (Ctrl + Rueda arriba sobre la imagen / Alt++)")
+        btn_img_zoom_in.clicked.connect(lambda: self.adjust_image_zoom(1))
+        row.addWidget(btn_img_zoom_in)
+
+        btn_img_zoom_reset = QPushButton("Restablecer")
+        btn_img_zoom_reset.setToolTip("Restablecer zoom y posición (Alt+0)")
+        btn_img_zoom_reset.clicked.connect(self.reset_image_zoom)
+        row.addWidget(btn_img_zoom_reset)
+
+        self.btn_img_fill = QPushButton("Llenar")
+        self.btn_img_fill.setCheckable(True)
+        self.btn_img_fill.setChecked(True)
+        self.btn_img_fill.setToolTip(
+            "Alternar: llenar todo el panel (recorta) / ajustar completo (barras negras)"
+        )
+        self.btn_img_fill.clicked.connect(self.toggle_image_fill_mode)
+        row.addWidget(self.btn_img_fill)
+
+        row.addStretch()
+        return row
 
     def _build_time_bar(self) -> QHBoxLayout:
         """Barra de tiempo: etiqueta actual, slider de progreso, etiqueta total."""
@@ -329,6 +511,15 @@ class ModernVideoPlayer(QMainWindow):
         self.btn_fs.setToolTip("Alternar pantalla completa (F / Doble Clic / Esc para salir)")
         self.btn_fs.clicked.connect(self.toggle_fullscreen)
         ctrl1.addWidget(self.btn_fs)
+
+        self.btn_split = QPushButton("Pantalla dividida")
+        self.btn_split.setCheckable(True)
+        self.btn_split.setChecked(self.split_mode)
+        self.btn_split.setToolTip(
+            "Mostrar a la vez el video y un panel de imagen independiente (D)"
+        )
+        self.btn_split.clicked.connect(self.toggle_split_mode)
+        ctrl1.addWidget(self.btn_split)
 
         return ctrl1
 
@@ -488,6 +679,18 @@ class ModernVideoPlayer(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Minus), self, lambda: self.adjust_zoom(-1))
         QShortcut(QKeySequence(Qt.Key.Key_0), self, self.reset_zoom)
 
+        # Pantalla dividida y panel de imagen: teclas separadas de las del
+        # video de arriba para poder manipular ambos paneles sin choques
+        # (p. ej. Izquierda/Derecha ya retroceden/adelantan el video).
+        QShortcut(QKeySequence(Qt.Key.Key_D), self, self.toggle_split_mode)
+        QShortcut(QKeySequence(Qt.Key.Key_Comma), self, self.show_previous_image)
+        QShortcut(QKeySequence(Qt.Key.Key_Period), self, self.show_next_image)
+        QShortcut(QKeySequence("Alt+R"), self, lambda: self.rotate_image(90))
+        QShortcut(QKeySequence("Alt+Shift+R"), self, lambda: self.rotate_image(-90))
+        QShortcut(QKeySequence("Alt++"), self, lambda: self.adjust_image_zoom(1))
+        QShortcut(QKeySequence("Alt+-"), self, lambda: self.adjust_image_zoom(-1))
+        QShortcut(QKeySequence("Alt+0"), self, self.reset_image_zoom)
+
     # ------------------------------------------------------------------
     # Persistencia de estado
     # ------------------------------------------------------------------
@@ -513,6 +716,18 @@ class ModernVideoPlayer(QMainWindow):
             for i in range(self.playlist.count())
         ]
 
+    def restore_images(self):
+        """Reconstruye el panel de imagen con las fotos de la sesión anterior.
+
+        Igual que restore_playlist(): solo puebla la lista, sin mostrar
+        automáticamente ninguna imagen si el usuario no dejó el modo
+        pantalla dividida activado.
+        """
+        saved = self.settings.image_paths()
+        if saved:
+            self.add_image_paths(saved, show_first=self.split_mode)
+            logger.info("Panel de imagen restaurado: %d elemento(s)", len(self.image_paths))
+
     def closeEvent(self, event):
         self.settings.set_window_geometry(self.saveGeometry())
         self.settings.set_volume(self.slider_vol.value())
@@ -520,6 +735,8 @@ class ModernVideoPlayer(QMainWindow):
         self.settings.set_fill_mode(self.btn_fill.isChecked())
         self.settings.set_loop(self.loop_video)
         self.settings.set_playlist_paths(self.current_playlist_paths())
+        self.settings.set_split_mode(self.split_mode)
+        self.settings.set_image_paths(self.image_paths)
         self.settings.sync()
 
         # Liberar recursos y salir rápido: sin miniaturas pendientes.
@@ -546,8 +763,25 @@ class ModernVideoPlayer(QMainWindow):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
-        self.add_paths(paths, autoplay=True)
+        """Reparte lo soltado entre el panel de video y el de imagen.
+
+        Cada ruta se clasifica por extensión (o, si es una carpeta, se le
+        pide a cada panel que se quede solo con lo suyo); así se puede
+        soltar una mezcla de videos y fotos —o una carpeta con ambos— de
+        una sola vez y cada uno termina en su panel correspondiente.
+        """
+        raw_paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        existing = []
+        for p in raw_paths:
+            norm = self._normalize_path(p)
+            if os.path.isdir(norm) or os.path.isfile(norm):
+                existing.append(p)
+            else:
+                logger.warning("Ruta ignorada (no existe): %s", p)
+        if not existing:
+            return
+        self.add_paths(existing, autoplay=True)
+        self.add_image_paths(existing, show_first=False)
 
     def open_file_dialog(self):
         start_dir = self.settings.last_folder()
@@ -561,6 +795,18 @@ class ModernVideoPlayer(QMainWindow):
             self.settings.set_last_folder(os.path.dirname(files[0]))
             self.add_paths(files, autoplay=True)
 
+    def open_image_dialog(self):
+        start_dir = self.settings.last_image_folder()
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Seleccionar Imágenes",
+            start_dir,
+            "Imágenes (*.jpg *.jpeg *.png *.bmp *.gif *.webp *.tif *.tiff *.ico);;Todos (*.*)",
+        )
+        if files:
+            self.settings.set_last_image_folder(os.path.dirname(files[0]))
+            self.add_image_paths(files)
+
     @staticmethod
     def _normalize_path(path: str) -> str:
         """Normaliza a una forma absoluta canónica.
@@ -573,43 +819,54 @@ class ModernVideoPlayer(QMainWindow):
         """
         return os.path.normpath(os.path.abspath(os.path.expanduser(path)))
 
-    def add_paths(self, paths, autoplay: bool = True):
-        all_files = []
-        seen = set()
+    @staticmethod
+    def _collect_matching_files(paths, extensions: set, known: set) -> list:
+        """Recorre `paths` (archivos sueltos o carpetas) y devuelve, en
+        orden, las rutas nuevas cuya extensión está en `extensions` y que
+        todavía no están en `known` (se actualiza in place a medida que
+        se van encontrando, así una misma ruta no se repite ni dentro de
+        esta misma llamada ni frente a lo que ya hubiera en la galería).
+
+        Compartido por la galería de video y la de imagen: ambas
+        necesitan exactamente este recorrido, solo cambia el conjunto de
+        extensiones aceptado.
+        """
+        collected = []
         for raw_p in paths:
-            p = self._normalize_path(raw_p)
+            p = ModernVideoPlayer._normalize_path(raw_p)
             if os.path.isdir(p):
                 for root, _, files in os.walk(p):
                     for f in sorted(files):
                         ext = os.path.splitext(f)[1].lower()
-                        if ext in VIDEO_EXTENSIONS:
+                        if ext in extensions:
                             full = os.path.normpath(os.path.join(root, f))
-                            if full not in seen:
-                                seen.add(full)
-                                all_files.append(full)
+                            if full not in known:
+                                known.add(full)
+                                collected.append(full)
             elif os.path.isfile(p):
-                if p not in seen:
-                    seen.add(p)
-                    all_files.append(p)
+                if p not in known:
+                    known.add(p)
+                    collected.append(p)
             else:
                 logger.warning("Ruta ignorada (no existe): %s", raw_p)
+        return collected
+
+    def add_paths(self, paths, autoplay: bool = True):
+        all_files = self._collect_matching_files(
+            paths, VIDEO_EXTENSIONS, set(self.items_map.keys())
+        )
 
         placeholder = QPixmap(130, 75)
         placeholder.fill(Qt.GlobalColor.lightGray)
 
         first_added = None
-        added_new = 0
         for path in all_files:
-            if path in self.items_map:
-                continue
-
             name = os.path.basename(path)
             item = QListWidgetItem(QIcon(placeholder), f" {name}")
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setToolTip(path)
             self.playlist.addItem(item)
             self.items_map[path] = item
-            added_new += 1
 
             if first_added is None:
                 first_added = item
@@ -618,7 +875,7 @@ class ModernVideoPlayer(QMainWindow):
             worker.signals.finished.connect(self.on_thumb_ready)
             self.thread_pool.start(worker)
 
-        logger.info("%d archivo(s) nuevo(s) agregado(s) a la galería", added_new)
+        logger.info("%d archivo(s) nuevo(s) agregado(s) a la galería", len(all_files))
 
         if (
             autoplay
@@ -890,6 +1147,141 @@ class ModernVideoPlayer(QMainWindow):
         self.stop_video()
         self.items_map.clear()
         self.playlist.clear()
+
+    # ------------------------------------------------------------------
+    # Pantalla dividida
+    # ------------------------------------------------------------------
+    def toggle_split_mode(self):
+        """Muestra/oculta el panel de imagen junto al de video.
+
+        `self.split_mode` es la única fuente de verdad (se invierte aquí
+        y se refleja en el botón), así el método funciona igual venga del
+        clic en `btn_split` o del atajo de teclado (D), que no toca el
+        estado del botón por su cuenta.
+
+        Activar o desactivar la pantalla dividida no modifica nada del
+        estado del video (posición, velocidad, rotación...) ni de la
+        imagen actual: cada panel sigue siendo dueño de su propio estado.
+        """
+        self.split_mode = not self.split_mode
+        self.btn_split.setChecked(self.split_mode)
+        self.image_panel.setVisible(self.split_mode)
+        if self.split_mode:
+            # El ancho del propio splitter (no la suma de sizes(), que con
+            # el panel de imagen recién oculto puede no reflejar 0 de forma
+            # fiable según la versión de Qt) es lo único que garantiza
+            # repartir el espacio realmente disponible en dos mitades.
+            total = self.media_splitter.width() or 2
+            self.media_splitter.setSizes([total // 2, total - total // 2])
+
+    # ------------------------------------------------------------------
+    # Panel de imagen (independiente del video)
+    # ------------------------------------------------------------------
+    def add_image_paths(self, paths, show_first: bool = True):
+        """Agrega imágenes al panel de imagen (deduplicando por ruta).
+
+        `show_first=False` se usa al restaurar la galería guardada o al
+        recibir un drop mixto video+imagen, para no interrumpir lo que ya
+        se estuviera viendo en el panel.
+        """
+        added = self._collect_matching_files(
+            paths, IMAGE_EXTENSIONS, set(self.image_paths)
+        )
+        if not added:
+            return
+
+        self.image_paths.extend(added)
+        logger.info("%d imagen(es) nueva(s) agregada(s) al panel de imagen", len(added))
+
+        if show_first:
+            self.show_image_at(len(self.image_paths) - len(added))
+        else:
+            self._update_image_counter()
+
+    def show_image_at(self, index: int):
+        """Carga y muestra la imagen en `index`; limpia la vista si la
+        lista está vacía o el archivo ya no se puede leer."""
+        if not self.image_paths:
+            self.image_index = -1
+            self.image_view.clear()
+            self._update_image_counter()
+            return
+
+        index = max(0, min(index, len(self.image_paths) - 1))
+        self.image_index = index
+        path = self.image_paths[index]
+
+        img = QImage(path) if os.path.exists(path) else QImage()
+        if img.isNull():
+            logger.warning("No se pudo cargar la imagen: %s", path)
+            self.statusBar().showMessage(
+                f"No se pudo cargar la imagen: {os.path.basename(path)}", 6000
+            )
+            self.image_view.clear()
+            self._update_image_counter()
+            return
+
+        self.image_view.set_frame(img)
+        # Reencuadra el paneo para el tamaño de la nueva imagen: sin esto,
+        # un desplazamiento válido para la foto anterior podía quedar
+        # fuera de rango para esta (aspecto distinto) hasta el próximo
+        # zoom/giro manual, que es lo único que hoy recalcula el clamp.
+        self.image_view.set_zoom(self.image_zoom)
+        self._update_image_counter()
+
+    def show_next_image(self):
+        """Siguiente imagen (manual): envuelve al llegar al final."""
+        count = len(self.image_paths)
+        if count == 0:
+            return
+        next_index = self.image_index + 1 if self.image_index + 1 < count else 0
+        self.show_image_at(next_index)
+
+    def show_previous_image(self):
+        """Imagen anterior (manual): envuelve al llegar al inicio."""
+        count = len(self.image_paths)
+        if count == 0:
+            return
+        prev_index = self.image_index - 1 if self.image_index - 1 >= 0 else count - 1
+        self.show_image_at(prev_index)
+
+    def remove_current_image(self):
+        if not self.image_paths or self.image_index < 0:
+            self.statusBar().showMessage(
+                "No hay ninguna imagen cargada para quitar", 4000
+            )
+            return
+        removed_index = self.image_index
+        del self.image_paths[removed_index]
+        self.show_image_at(removed_index)
+
+    def _update_image_counter(self):
+        total = len(self.image_paths)
+        current = self.image_index + 1 if 0 <= self.image_index < total else 0
+        self.lbl_img_counter.setText(f"{current} / {total}")
+
+    def rotate_image(self, delta):
+        """Gira la imagen. delta positivo = horario, negativo = antihorario."""
+        self.image_rotation = (self.image_rotation + delta) % 360
+        self.image_view.set_rotation(self.image_rotation)
+        self.lbl_img_rot.setText(f"{self.image_rotation}°")
+
+    def adjust_image_zoom(self, step):
+        """step positivo = acercar, negativo = alejar."""
+        increment = 0.1 * step
+        self.image_zoom = max(0.2, min(8.0, self.image_zoom + increment))
+        self.image_view.set_zoom(self.image_zoom)
+        self.lbl_img_zoom.setText(f"{int(self.image_zoom * 100)}%")
+
+    def reset_image_zoom(self):
+        self.image_zoom = 1.0
+        self.image_view.reset_view()
+        self.lbl_img_zoom.setText("100%")
+
+    def toggle_image_fill_mode(self):
+        fill = self.btn_img_fill.isChecked()
+        self.image_view.set_fill_mode(fill)
+        self.btn_img_fill.setText("Llenar" if fill else "Ajustar")
 
     @staticmethod
     def fmt_time(ms):

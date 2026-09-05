@@ -77,12 +77,28 @@ class AppSettings:
     def set_loop(self, value: bool) -> None:
         self._s.setValue("playback/loop", value)
 
+    # --- Pantalla dividida (video + imagen) -------------------------------
+    def split_mode(self) -> bool:
+        try:
+            return bool(self._s.value("layout/split_mode", False, type=bool))
+        except (TypeError, ValueError):
+            return False
+
+    def set_split_mode(self, value: bool) -> None:
+        self._s.setValue("layout/split_mode", value)
+
     # --- Sesión ----------------------------------------------------------
     def last_folder(self) -> str:
         return str(self._s.value("session/last_folder", ""))
 
     def set_last_folder(self, path: str) -> None:
         self._s.setValue("session/last_folder", path)
+
+    def last_image_folder(self) -> str:
+        return str(self._s.value("session/last_image_folder", ""))
+
+    def set_last_image_folder(self, path: str) -> None:
+        self._s.setValue("session/last_image_folder", path)
 
     # --- Galería persistente ----------------------------------------------
     def playlist_paths(self) -> List[str]:
@@ -104,6 +120,23 @@ class AppSettings:
 
     def set_playlist_paths(self, paths: List[str]) -> None:
         self._s.setValue("session/playlist", [str(p) for p in paths])
+
+    # --- Galería de imágenes (panel de pantalla dividida) ------------------
+    def image_paths(self) -> List[str]:
+        """Misma normalización que playlist_paths(): ver ese método."""
+        raw = self._s.value("session/images", [])
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            return [raw] if raw else []
+        try:
+            return [str(p) for p in raw if p]
+        except TypeError:
+            logger.warning("Lista de imágenes corrupta en settings; se ignora")
+            return []
+
+    def set_image_paths(self, paths: List[str]) -> None:
+        self._s.setValue("session/images", [str(p) for p in paths])
 
     def sync(self) -> None:
         self._s.sync()
