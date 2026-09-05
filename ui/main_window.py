@@ -23,6 +23,21 @@ Mejoras respecto a la versión anterior:
     rotación/zoom/paneo/relleno) y mantiene su propia lista de fotos,
     índice de navegación, rotación y zoom, totalmente separados del
     estado del reproductor de video.
+
+Tercera pasada (UI/UX y accesibilidad, ver AUDIT_UX.md):
+  - Estado vacío real en la galería de video (antes era una lista en
+    blanco sin ninguna pista de qué hacer).
+  - Miniatura "pendiente" unificada con la genérica de fallo (mismo
+    dibujo, un solo lenguaje visual) en vez de un rectángulo gris plano.
+  - Paneles de controles (video e imagen) con aspecto de tarjeta elevada
+    (ver ui.theme.apply_elevation), igual que ya tenía la galería.
+  - Nombres accesibles (QAccessible, vía setAccessibleName) en los
+    botones que solo llevan un símbolo (⏮ ⏭ ↺ ↻ − + 🔊), para lectores
+    de pantalla (Orca/AT-SPI en KDE).
+  - Menú contextual (clic derecho) en la galería y en el panel de
+    imagen: reproducir/quitar y "Abrir carpeta contenedora" (integración
+    con el gestor de archivos vía QDesktopServices, patrón nativo de
+    escritorio Linux).
 """
 from __future__ import annotations
 
@@ -30,7 +45,14 @@ import logging
 import os
 
 from PyQt6.QtCore import QSize, Qt, QTimer, QThreadPool, QUrl
-from PyQt6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PyQt6.QtGui import (
+    QDesktopServices,
+    QIcon,
+    QImage,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -39,16 +61,19 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QPushButton,
     QSlider,
     QSplitter,
+    QStackedWidget,
     QStyle,
     QVBoxLayout,
     QWidget,
 )
 
 from core.settings import AppSettings
-from core.thumbnail_cache import ThumbWorker
+from core.thumbnail_cache import ThumbWorker, fallback_thumb
+from ui.theme import apply_elevation
 from ui.video_widget import DirectVideoWidget
 
 logger = logging.getLogger("reproductor.ui")
@@ -279,16 +304,20 @@ class ModernVideoPlayer(QMainWindow):
         video_layout.addWidget(self.video_view, stretch=1)
 
         # Contenedor de controles inferiores: se oculta junto con el panel
-        # lateral cuando se entra en pantalla completa.
+        # lateral cuando se entra en pantalla completa. objectName
+        # "controlsCard" le da el aspecto de tarjeta definido en el QSS
+        # (ui/theme.py); apply_elevation añade la sombra por encima de eso.
         controls_panel = QWidget()
+        controls_panel.setObjectName("controlsCard")
         controls_layout = QVBoxLayout(controls_panel)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setContentsMargins(14, 12, 14, 12)
         controls_layout.setSpacing(10)
         controls_layout.addLayout(self._build_time_bar())
         controls_layout.addLayout(self._build_transport_row())
         controls_layout.addLayout(self._build_rotation_zoom_speed_row())
 
         self.controls_panel = controls_panel
+        apply_elevation(self.controls_panel, level=1)
         video_layout.addWidget(self.controls_panel)
         return video_box
 
@@ -311,10 +340,23 @@ class ModernVideoPlayer(QMainWindow):
         self.image_view.wheelScrolled.connect(
             lambda delta: self.adjust_image_zoom(1 if delta > 0 else -1)
         )
+        self.image_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.image_view.customContextMenuRequested.connect(self._show_image_context_menu)
         image_layout.addWidget(self.image_view, stretch=1)
 
-        image_layout.addLayout(self._build_image_nav_row())
-        image_layout.addLayout(self._build_image_transform_row())
+        # Misma tarjeta "controlsCard" que usa el panel de video, para que
+        # ambos paneles lean como el mismo lenguaje visual.
+        image_controls_panel = QWidget()
+        image_controls_panel.setObjectName("controlsCard")
+        image_controls_layout = QVBoxLayout(image_controls_panel)
+        image_controls_layout.setContentsMargins(14, 12, 14, 12)
+        image_controls_layout.setSpacing(10)
+        image_controls_layout.addLayout(self._build_image_nav_row())
+        image_controls_layout.addLayout(self._build_image_transform_row())
+
+        self.image_controls_panel = image_controls_panel
+        apply_elevation(self.image_controls_panel, level=1)
+        image_layout.addWidget(self.image_controls_panel)
 
         self.image_panel = image_box
         return image_box
@@ -322,18 +364,19 @@ class ModernVideoPlayer(QMainWindow):
     def _build_image_nav_row(self) -> QHBoxLayout:
         """Fila 1 del panel de imagen: cargar y navegar entre fotos."""
         row = QHBoxLayout()
-        row.setSpacing(6)
+        row.setSpacing(8)
 
         btn_add_img = QPushButton("+  Cargar imágenes")
         btn_add_img.setObjectName("primaryBtn")
         btn_add_img.clicked.connect(self.open_image_dialog)
         row.addWidget(btn_add_img)
 
-        row.addSpacing(6)
+        row.addSpacing(8)
 
         self.btn_img_prev = QPushButton("⏮")
         self.btn_img_prev.setObjectName("transportBtn")
         self.btn_img_prev.setToolTip("Imagen anterior (,)")
+        self.btn_img_prev.setAccessibleName("Imagen anterior")
         self.btn_img_prev.clicked.connect(self.show_previous_image)
         row.addWidget(self.btn_img_prev)
 
@@ -344,6 +387,7 @@ class ModernVideoPlayer(QMainWindow):
         self.btn_img_next = QPushButton("⏭")
         self.btn_img_next.setObjectName("transportBtn")
         self.btn_img_next.setToolTip("Siguiente imagen (.)")
+        self.btn_img_next.setAccessibleName("Siguiente imagen")
         self.btn_img_next.clicked.connect(self.show_next_image)
         row.addWidget(self.btn_img_next)
 
@@ -360,7 +404,7 @@ class ModernVideoPlayer(QMainWindow):
     def _build_image_transform_row(self) -> QHBoxLayout:
         """Fila 2 del panel de imagen: giro, zoom y relleno."""
         row = QHBoxLayout()
-        row.setSpacing(6)
+        row.setSpacing(8)
 
         cap_giro = QLabel("Giro")
         cap_giro.setObjectName("groupCaption")
@@ -368,11 +412,13 @@ class ModernVideoPlayer(QMainWindow):
 
         btn_img_ccw = QPushButton("↺")
         btn_img_ccw.setToolTip("Girar antihorario (Alt+Shift+R)")
+        btn_img_ccw.setAccessibleName("Girar imagen antihorario")
         btn_img_ccw.clicked.connect(lambda: self.rotate_image(-90))
         row.addWidget(btn_img_ccw)
 
         btn_img_cw = QPushButton("↻")
         btn_img_cw.setToolTip("Girar horario (Alt+R)")
+        btn_img_cw.setAccessibleName("Girar imagen horario")
         btn_img_cw.clicked.connect(lambda: self.rotate_image(90))
         row.addWidget(btn_img_cw)
 
@@ -388,6 +434,7 @@ class ModernVideoPlayer(QMainWindow):
 
         btn_img_zoom_out = QPushButton("−")
         btn_img_zoom_out.setToolTip("Alejar (Ctrl + Rueda abajo sobre la imagen / Alt+-)")
+        btn_img_zoom_out.setAccessibleName("Alejar imagen")
         btn_img_zoom_out.clicked.connect(lambda: self.adjust_image_zoom(-1))
         row.addWidget(btn_img_zoom_out)
 
@@ -397,6 +444,7 @@ class ModernVideoPlayer(QMainWindow):
 
         btn_img_zoom_in = QPushButton("+")
         btn_img_zoom_in.setToolTip("Acercar (Ctrl + Rueda arriba sobre la imagen / Alt++)")
+        btn_img_zoom_in.setAccessibleName("Acercar imagen")
         btn_img_zoom_in.clicked.connect(lambda: self.adjust_image_zoom(1))
         row.addWidget(btn_img_zoom_in)
 
@@ -440,11 +488,12 @@ class ModernVideoPlayer(QMainWindow):
     def _build_transport_row(self) -> QHBoxLayout:
         """Fila 1: transporte, salto ±5s, volumen, bucle, pantalla completa."""
         ctrl1 = QHBoxLayout()
-        ctrl1.setSpacing(6)
+        ctrl1.setSpacing(8)
 
         self.btn_prev = QPushButton("⏮")
         self.btn_prev.setObjectName("transportBtn")
         self.btn_prev.setToolTip("Video anterior (P)")
+        self.btn_prev.setAccessibleName("Video anterior")
         self.btn_prev.clicked.connect(self.play_previous)
         ctrl1.addWidget(self.btn_prev)
 
@@ -454,12 +503,14 @@ class ModernVideoPlayer(QMainWindow):
             self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
         )
         self.btn_play.setToolTip("Reproducir / Pausar (Espacio)")
+        self.btn_play.setAccessibleName("Reproducir o pausar")
         self.btn_play.clicked.connect(self.toggle_play)
         ctrl1.addWidget(self.btn_play)
 
         self.btn_next = QPushButton("⏭")
         self.btn_next.setObjectName("transportBtn")
         self.btn_next.setToolTip("Siguiente video (N)")
+        self.btn_next.setAccessibleName("Siguiente video")
         self.btn_next.clicked.connect(self.play_next)
         ctrl1.addWidget(self.btn_next)
 
@@ -469,10 +520,11 @@ class ModernVideoPlayer(QMainWindow):
             self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop)
         )
         self.btn_stop.setToolTip("Detener")
+        self.btn_stop.setAccessibleName("Detener reproducción")
         self.btn_stop.clicked.connect(self.stop_video)
         ctrl1.addWidget(self.btn_stop)
 
-        ctrl1.addSpacing(6)
+        ctrl1.addSpacing(8)
 
         btn_back5 = QPushButton("-5s")
         btn_back5.setToolTip("Retroceder 5 segundos (Flecha Izquierda)")
@@ -484,10 +536,11 @@ class ModernVideoPlayer(QMainWindow):
         btn_fwd5.clicked.connect(lambda: self.seek_relative(5000))
         ctrl1.addWidget(btn_fwd5)
 
-        ctrl1.addSpacing(10)
+        ctrl1.addSpacing(12)
 
         self.btn_mute = QPushButton("🔊")
         self.btn_mute.setToolTip("Silenciar / Reactivar (M)")
+        self.btn_mute.setAccessibleName("Silenciar o reactivar audio")
         self.btn_mute.clicked.connect(self.toggle_mute)
         ctrl1.addWidget(self.btn_mute)
 
@@ -526,7 +579,7 @@ class ModernVideoPlayer(QMainWindow):
     def _build_rotation_zoom_speed_row(self) -> QHBoxLayout:
         """Fila 2: giro, zoom/relleno y velocidad de reproducción."""
         ctrl2 = QHBoxLayout()
-        ctrl2.setSpacing(6)
+        ctrl2.setSpacing(8)
 
         cap_giro = QLabel("Giro")
         cap_giro.setObjectName("groupCaption")
@@ -534,11 +587,13 @@ class ModernVideoPlayer(QMainWindow):
 
         btn_ccw = QPushButton("↺ 90°")
         btn_ccw.setToolTip("Girar antihorario (Shift+R)")
+        btn_ccw.setAccessibleName("Girar video antihorario 90 grados")
         btn_ccw.clicked.connect(lambda: self.rotate_video(-90))
         ctrl2.addWidget(btn_ccw)
 
         btn_cw = QPushButton("↻ 90°")
         btn_cw.setToolTip("Girar horario (R)")
+        btn_cw.setAccessibleName("Girar video horario 90 grados")
         btn_cw.clicked.connect(lambda: self.rotate_video(90))
         ctrl2.addWidget(btn_cw)
 
@@ -562,6 +617,7 @@ class ModernVideoPlayer(QMainWindow):
 
         btn_zoom_out = QPushButton("−")
         btn_zoom_out.setToolTip("Alejar (Ctrl + Rueda abajo / -)")
+        btn_zoom_out.setAccessibleName("Alejar video")
         btn_zoom_out.clicked.connect(lambda: self.adjust_zoom(-1))
         ctrl2.addWidget(btn_zoom_out)
 
@@ -571,6 +627,7 @@ class ModernVideoPlayer(QMainWindow):
 
         btn_zoom_in = QPushButton("+")
         btn_zoom_in.setToolTip("Acercar (Ctrl + Rueda arriba / +)")
+        btn_zoom_in.setAccessibleName("Acercar video")
         btn_zoom_in.clicked.connect(lambda: self.adjust_zoom(1))
         ctrl2.addWidget(btn_zoom_in)
 
@@ -617,7 +674,14 @@ class ModernVideoPlayer(QMainWindow):
         return ctrl2
 
     def _build_gallery_panel(self) -> QWidget:
-        """Panel derecho: galería de videos y sus acciones."""
+        """Panel derecho: galería de videos y sus acciones.
+
+        Incluye un estado vacío real (antes una lista en blanco no daba
+        ninguna pista de qué hacer) implementado con QStackedWidget: la
+        página 0 es la lista, la 1 es el mensaje de "sin videos"; se
+        alterna en _update_gallery_empty_state() cada vez que cambia el
+        contenido de la galería.
+        """
         right_box = QWidget()
         right_layout = QVBoxLayout(right_box)
         right_layout.setContentsMargins(8, 12, 12, 12)
@@ -630,11 +694,19 @@ class ModernVideoPlayer(QMainWindow):
         self.playlist = QListWidget()
         self.playlist.setIconSize(QSize(130, 75))
         self.playlist.itemActivated.connect(self.play_item)  # doble clic o Enter
-        right_layout.addWidget(self.playlist)
+        self.playlist.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.playlist.customContextMenuRequested.connect(self._show_playlist_context_menu)
+        apply_elevation(self.playlist, level=2)
+
+        self.playlist_stack = QStackedWidget()
+        self.playlist_stack.addWidget(self.playlist)
+        self.playlist_stack.addWidget(self._build_gallery_empty_state())
+        right_layout.addWidget(self.playlist_stack)
 
         btn_add = QPushButton("+  Agregar videos")
         btn_add.setObjectName("primaryBtn")
         btn_add.clicked.connect(self.open_file_dialog)
+        apply_elevation(btn_add, level=1)
         right_layout.addWidget(btn_add)
 
         row_actions = QHBoxLayout()
@@ -651,7 +723,83 @@ class ModernVideoPlayer(QMainWindow):
         right_layout.addLayout(row_actions)
 
         self.right_panel = right_box
+        self._update_gallery_empty_state()
         return right_box
+
+    def _build_gallery_empty_state(self) -> QWidget:
+        """Página del QStackedWidget mostrada cuando la galería está vacía."""
+        empty = QWidget()
+        empty.setObjectName("emptyState")
+        layout = QVBoxLayout(empty)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(8)
+
+        title = QLabel("Sin videos todavía")
+        title.setObjectName("emptyStateTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        hint = QLabel("Arrastra archivos o carpetas aquí,\no usa “+ Agregar videos” abajo")
+        hint.setObjectName("emptyStateHint")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint)
+
+        return empty
+
+    def _update_gallery_empty_state(self):
+        """Alterna entre la lista y el mensaje de estado vacío."""
+        self.playlist_stack.setCurrentIndex(0 if self.playlist.count() > 0 else 1)
+
+    def _show_playlist_context_menu(self, pos):
+        """Menú contextual (clic derecho) de la galería de video."""
+        item = self.playlist.itemAt(pos)
+        menu = QMenu(self)
+        if item is not None:
+            act_play = menu.addAction("Reproducir")
+            act_play.triggered.connect(lambda: self.play_item(item))
+            act_open_folder = menu.addAction("Abrir carpeta contenedora")
+            act_open_folder.triggered.connect(
+                lambda: self._open_containing_folder(item.data(Qt.ItemDataRole.UserRole))
+            )
+            menu.addSeparator()
+            act_remove = menu.addAction("Quitar de la galería")
+            act_remove.triggered.connect(lambda: self._remove_playlist_item(item))
+        else:
+            act_add = menu.addAction("Agregar videos…")
+            act_add.triggered.connect(self.open_file_dialog)
+        if self.playlist.count() > 0:
+            menu.addSeparator()
+            act_clear = menu.addAction("Limpiar toda la galería")
+            act_clear.triggered.connect(self.clear_all)
+        menu.exec(self.playlist.viewport().mapToGlobal(pos))
+
+    def _show_image_context_menu(self, pos):
+        """Menú contextual (clic derecho) del panel de imagen."""
+        menu = QMenu(self)
+        act_add = menu.addAction("Cargar imágenes…")
+        act_add.triggered.connect(self.open_image_dialog)
+        if self.image_paths and 0 <= self.image_index < len(self.image_paths):
+            current_path = self.image_paths[self.image_index]
+            act_open_folder = menu.addAction("Abrir carpeta contenedora")
+            act_open_folder.triggered.connect(
+                lambda: self._open_containing_folder(current_path)
+            )
+            menu.addSeparator()
+            act_remove = menu.addAction("Quitar esta imagen")
+            act_remove.triggered.connect(self.remove_current_image)
+        menu.exec(self.image_view.mapToGlobal(pos))
+
+    def _open_containing_folder(self, path):
+        """Abre la carpeta que contiene `path` en el gestor de archivos
+        del sistema (Dolphin en KDE), vía QDesktopServices — mismo patrón
+        que "Abrir ubicación del archivo" en cualquier app de escritorio."""
+        if not path:
+            return
+        folder = os.path.dirname(path)
+        if os.path.isdir(folder):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        else:
+            self.statusBar().showMessage("La carpeta ya no existe", 4000)
 
     def setup_shortcuts(self):
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self.toggle_play)
@@ -856,13 +1004,16 @@ class ModernVideoPlayer(QMainWindow):
             paths, VIDEO_EXTENSIONS, set(self.items_map.keys())
         )
 
-        placeholder = QPixmap(130, 75)
-        placeholder.fill(Qt.GlobalColor.lightGray)
+        # Mismo dibujo que la miniatura de "no se pudo generar" (ver
+        # core/thumbnail_cache.fallback_thumb): un solo lenguaje visual
+        # para "todavía no hay miniatura real", en vez del rectángulo
+        # gris plano que se usaba antes solo aquí.
+        placeholder = QIcon(QPixmap.fromImage(fallback_thumb()))
 
         first_added = None
         for path in all_files:
             name = os.path.basename(path)
-            item = QListWidgetItem(QIcon(placeholder), f" {name}")
+            item = QListWidgetItem(placeholder, f" {name}")
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setToolTip(path)
             self.playlist.addItem(item)
@@ -876,6 +1027,7 @@ class ModernVideoPlayer(QMainWindow):
             self.thread_pool.start(worker)
 
         logger.info("%d archivo(s) nuevo(s) agregado(s) a la galería", len(all_files))
+        self._update_gallery_empty_state()
 
         if (
             autoplay
@@ -1131,6 +1283,15 @@ class ModernVideoPlayer(QMainWindow):
     # ------------------------------------------------------------------
     # Gestión de galería
     # ------------------------------------------------------------------
+    def _remove_playlist_item(self, item):
+        """Quita un único item de la galería (usado por remove_selected y
+        por el menú contextual, que puede operar sobre un item que ni
+        siquiera está seleccionado)."""
+        path = item.data(Qt.ItemDataRole.UserRole)
+        self.items_map.pop(path, None)
+        self.playlist.takeItem(self.playlist.row(item))
+        self._update_gallery_empty_state()
+
     def remove_selected(self):
         items = self.playlist.selectedItems()
         if not items:
@@ -1139,14 +1300,13 @@ class ModernVideoPlayer(QMainWindow):
             )
             return
         for item in items:
-            path = item.data(Qt.ItemDataRole.UserRole)
-            self.items_map.pop(path, None)
-            self.playlist.takeItem(self.playlist.row(item))
+            self._remove_playlist_item(item)
 
     def clear_all(self):
         self.stop_video()
         self.items_map.clear()
         self.playlist.clear()
+        self._update_gallery_empty_state()
 
     # ------------------------------------------------------------------
     # Pantalla dividida
