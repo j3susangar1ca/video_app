@@ -87,6 +87,7 @@ from PyQt6.QtWidgets import (
 
 from core.settings import AppSettings
 from core.thumbnail_cache import ImageThumbWorker, ThumbWorker, fallback_thumb
+from ui.flow_layout import FlowLayout
 from ui.theme import apply_elevation
 from ui.video_widget import DirectVideoWidget
 
@@ -296,6 +297,30 @@ class ModernVideoPlayer(QMainWindow):
             "Arrastra videos o carpetas aquí, o usa 'Agregar videos'", 6000
         )
 
+    def _make_control_group(self, *members) -> QWidget:
+        """Agrupa widgets relacionados (p. ej. "Giro" + sus botones) en un
+        solo bloque atómico para FlowLayout.
+
+        Antes las filas de controles eran un único QHBoxLayout: si el
+        panel se hacía más angosto que la fila entera (algo habitual
+        ahora que los paneles son ajustables por el usuario), Qt no
+        reorganizaba nada — sencillamente dejaba el sobrante fuera del
+        área visible, cortando el texto de los últimos botones a la
+        mitad. Con FlowLayout el sobrante baja de línea, pero si cada
+        botón fuera un ítem suelto un grupo podría partirse a la mitad
+        (p. ej. la etiqueta "Zoom" en una línea y sus botones en la
+        siguiente). Agrupar cada conjunto relacionado en un widget
+        asegura que salte ENTERO a la siguiente línea, nunca a medias.
+        """
+        group = QWidget()
+        group.setObjectName("controlGroup")
+        layout = QHBoxLayout(group)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        for member in members:
+            layout.addWidget(member)
+        return group
+
     def _build_left_panel(self) -> QWidget:
         """Área de medios: splitter interno con el panel de video y,
         opcionalmente, el panel de imagen en modo pantalla dividida.
@@ -361,8 +386,13 @@ class ModernVideoPlayer(QMainWindow):
         controls_layout.setContentsMargins(14, 12, 14, 12)
         controls_layout.setSpacing(10)
         controls_layout.addLayout(self._build_time_bar())
-        controls_layout.addLayout(self._build_transport_row())
-        controls_layout.addLayout(self._build_rotation_zoom_speed_row())
+        # Las dos siguientes son QWidget con FlowLayout (no QHBoxLayout):
+        # ver _make_control_group y ui/flow_layout.py — cada grupo de
+        # controles relacionados salta a la siguiente línea si no cabe,
+        # así ningún botón queda con el texto cortado sin importar cuánto
+        # se estreche el panel.
+        controls_layout.addWidget(self._build_transport_row())
+        controls_layout.addWidget(self._build_rotation_zoom_speed_row())
 
         self.controls_panel = controls_panel
         # El ratón "descansando" sobre los controles (p. ej. mientras se
@@ -406,8 +436,8 @@ class ModernVideoPlayer(QMainWindow):
         image_controls_layout = QVBoxLayout(image_controls_panel)
         image_controls_layout.setContentsMargins(14, 12, 14, 12)
         image_controls_layout.setSpacing(10)
-        image_controls_layout.addLayout(self._build_image_nav_row())
-        image_controls_layout.addLayout(self._build_image_transform_row())
+        image_controls_layout.addWidget(self._build_image_nav_row())
+        image_controls_layout.addWidget(self._build_image_transform_row())
 
         self.image_controls_panel = image_controls_panel
         apply_elevation(self.image_controls_panel, level=1)
@@ -416,7 +446,7 @@ class ModernVideoPlayer(QMainWindow):
         self.image_panel = image_box
         return image_box
 
-    def _build_image_nav_row(self) -> QHBoxLayout:
+    def _build_image_nav_row(self) -> QWidget:
         """Fila 1 del panel de imagen: navegar entre las fotos cargadas.
 
         Cargar/quitar imágenes de la lista vive en la pestaña "Imágenes"
@@ -424,96 +454,87 @@ class ModernVideoPlayer(QMainWindow):
         panel de video tampoco tiene un botón de "agregar" bajo el
         reproductor: la gestión de la colección vive en la galería, este
         panel es solo para verla y navegarla.
-        """
-        row = QHBoxLayout()
-        row.setSpacing(8)
 
+        Devuelve un QWidget con FlowLayout (no un QHBoxLayout): así el
+        grupo de navegación y el botón "Quitar" bajan a una segunda línea
+        en vez de cortarse si el panel de imagen es angosto.
+        """
         self.btn_img_prev = QPushButton("⏮")
         self.btn_img_prev.setObjectName("transportBtn")
         self.btn_img_prev.setToolTip("Imagen anterior (,)")
         self.btn_img_prev.setAccessibleName("Imagen anterior")
         self.btn_img_prev.clicked.connect(self.show_previous_image)
-        row.addWidget(self.btn_img_prev)
 
         self.lbl_img_counter = QLabel("0 / 0")
         self.lbl_img_counter.setObjectName("statLabel")
-        row.addWidget(self.lbl_img_counter)
 
         self.btn_img_next = QPushButton("⏭")
         self.btn_img_next.setObjectName("transportBtn")
         self.btn_img_next.setToolTip("Siguiente imagen (.)")
         self.btn_img_next.setAccessibleName("Siguiente imagen")
         self.btn_img_next.clicked.connect(self.show_next_image)
-        row.addWidget(self.btn_img_next)
-
-        row.addStretch()
 
         btn_img_remove = QPushButton("Quitar")
         btn_img_remove.setObjectName("dangerBtn")
         btn_img_remove.setToolTip("Quitar la imagen actual de la lista")
         btn_img_remove.clicked.connect(self.remove_current_image)
-        row.addWidget(btn_img_remove)
 
+        row = QWidget()
+        flow = FlowLayout(row, margin=0, h_spacing=16, v_spacing=8)
+        flow.addWidget(
+            self._make_control_group(self.btn_img_prev, self.lbl_img_counter, self.btn_img_next)
+        )
+        flow.addWidget(self._make_control_group(btn_img_remove))
         return row
 
-    def _build_image_transform_row(self) -> QHBoxLayout:
-        """Fila 2 del panel de imagen: giro, zoom y relleno."""
-        row = QHBoxLayout()
-        row.setSpacing(8)
+    def _build_image_transform_row(self) -> QWidget:
+        """Fila 2 del panel de imagen: giro, zoom y relleno.
 
+        QWidget con FlowLayout: el grupo "Giro" y el grupo "Zoom" bajan
+        de línea completos (nunca a la mitad) si no caben uno junto al
+        otro en el ancho actual del panel.
+        """
         cap_giro = QLabel("Giro")
         cap_giro.setObjectName("groupCaption")
-        row.addWidget(cap_giro)
 
         btn_img_ccw = QPushButton("↺")
         btn_img_ccw.setToolTip("Girar antihorario (Alt+Shift+R)")
         btn_img_ccw.setAccessibleName("Girar imagen antihorario")
         btn_img_ccw.clicked.connect(lambda: self.rotate_image(-90))
-        row.addWidget(btn_img_ccw)
 
         btn_img_cw = QPushButton("↻")
         btn_img_cw.setToolTip("Girar horario (Alt+R)")
         btn_img_cw.setAccessibleName("Girar imagen horario")
         btn_img_cw.clicked.connect(lambda: self.rotate_image(90))
-        row.addWidget(btn_img_cw)
 
         self.lbl_img_rot = QLabel("0°")
         self.lbl_img_rot.setObjectName("statLabel")
-        row.addWidget(self.lbl_img_rot)
 
-        self.btn_img_flip = QPushButton("⇋ Espejo")
+        self.btn_img_flip = QPushButton("↔ Espejo")
         self.btn_img_flip.setCheckable(True)
         self.btn_img_flip.setToolTip("Espejar la imagen horizontalmente")
         self.btn_img_flip.setAccessibleName("Espejar imagen horizontalmente")
         self.btn_img_flip.clicked.connect(self.toggle_image_flip)
-        row.addWidget(self.btn_img_flip)
-
-        row.addSpacing(12)
 
         cap_zoom = QLabel("Zoom")
         cap_zoom.setObjectName("groupCaption")
-        row.addWidget(cap_zoom)
 
         btn_img_zoom_out = QPushButton("−")
         btn_img_zoom_out.setToolTip("Alejar (Ctrl + Rueda abajo sobre la imagen / Alt+-)")
         btn_img_zoom_out.setAccessibleName("Alejar imagen")
         btn_img_zoom_out.clicked.connect(lambda: self.adjust_image_zoom(-1))
-        row.addWidget(btn_img_zoom_out)
 
         self.lbl_img_zoom = QLabel("100%")
         self.lbl_img_zoom.setObjectName("statLabel")
-        row.addWidget(self.lbl_img_zoom)
 
         btn_img_zoom_in = QPushButton("+")
         btn_img_zoom_in.setToolTip("Acercar (Ctrl + Rueda arriba sobre la imagen / Alt++)")
         btn_img_zoom_in.setAccessibleName("Acercar imagen")
         btn_img_zoom_in.clicked.connect(lambda: self.adjust_image_zoom(1))
-        row.addWidget(btn_img_zoom_in)
 
         btn_img_zoom_reset = QPushButton("Restablecer")
         btn_img_zoom_reset.setToolTip("Restablecer zoom y posición (Alt+0)")
         btn_img_zoom_reset.clicked.connect(self.reset_image_zoom)
-        row.addWidget(btn_img_zoom_reset)
 
         self.btn_img_fill = QPushButton("Llenar")
         self.btn_img_fill.setCheckable(True)
@@ -522,9 +543,24 @@ class ModernVideoPlayer(QMainWindow):
             "Alternar: llenar todo el panel (recorta) / ajustar completo (barras negras)"
         )
         self.btn_img_fill.clicked.connect(self.toggle_image_fill_mode)
-        row.addWidget(self.btn_img_fill)
 
-        row.addStretch()
+        row = QWidget()
+        flow = FlowLayout(row, margin=0, h_spacing=16, v_spacing=8)
+        flow.addWidget(
+            self._make_control_group(
+                cap_giro, btn_img_ccw, btn_img_cw, self.lbl_img_rot, self.btn_img_flip
+            )
+        )
+        flow.addWidget(
+            self._make_control_group(
+                cap_zoom,
+                btn_img_zoom_out,
+                self.lbl_img_zoom,
+                btn_img_zoom_in,
+                btn_img_zoom_reset,
+                self.btn_img_fill,
+            )
+        )
         return row
 
     def _build_time_bar(self) -> QHBoxLayout:
@@ -547,17 +583,19 @@ class ModernVideoPlayer(QMainWindow):
         time_bar.addWidget(self.lbl_total)
         return time_bar
 
-    def _build_transport_row(self) -> QHBoxLayout:
-        """Fila 1: transporte, salto ±5s, volumen, bucle, pantalla completa."""
-        ctrl1 = QHBoxLayout()
-        ctrl1.setSpacing(8)
+    def _build_transport_row(self) -> QWidget:
+        """Fila 1: transporte, salto ±5s, volumen, bucle, pantalla completa.
 
+        QWidget con FlowLayout, no QHBoxLayout: si el panel es angosto,
+        cada grupo (transporte / salto / volumen / modos) baja a su
+        propia línea ENTERO en vez de que Qt corte el texto de los
+        últimos botones al no caber la fila completa.
+        """
         self.btn_prev = QPushButton("⏮")
         self.btn_prev.setObjectName("transportBtn")
         self.btn_prev.setToolTip("Video anterior (P)")
         self.btn_prev.setAccessibleName("Video anterior")
         self.btn_prev.clicked.connect(self.play_previous)
-        ctrl1.addWidget(self.btn_prev)
 
         self.btn_play = QPushButton()
         self.btn_play.setObjectName("playPauseBtn")
@@ -567,14 +605,12 @@ class ModernVideoPlayer(QMainWindow):
         self.btn_play.setToolTip("Reproducir / Pausar (Espacio)")
         self.btn_play.setAccessibleName("Reproducir o pausar")
         self.btn_play.clicked.connect(self.toggle_play)
-        ctrl1.addWidget(self.btn_play)
 
         self.btn_next = QPushButton("⏭")
         self.btn_next.setObjectName("transportBtn")
         self.btn_next.setToolTip("Siguiente video (N)")
         self.btn_next.setAccessibleName("Siguiente video")
         self.btn_next.clicked.connect(self.play_next)
-        ctrl1.addWidget(self.btn_next)
 
         self.btn_stop = QPushButton()
         self.btn_stop.setObjectName("transportBtn")
@@ -584,48 +620,35 @@ class ModernVideoPlayer(QMainWindow):
         self.btn_stop.setToolTip("Detener")
         self.btn_stop.setAccessibleName("Detener reproducción")
         self.btn_stop.clicked.connect(self.stop_video)
-        ctrl1.addWidget(self.btn_stop)
-
-        ctrl1.addSpacing(8)
 
         btn_back5 = QPushButton("-5s")
         btn_back5.setToolTip("Retroceder 5 segundos (Flecha Izquierda)")
         btn_back5.clicked.connect(lambda: self.seek_relative(-5000))
-        ctrl1.addWidget(btn_back5)
 
         btn_fwd5 = QPushButton("+5s")
         btn_fwd5.setToolTip("Adelantar 5 segundos (Flecha Derecha)")
         btn_fwd5.clicked.connect(lambda: self.seek_relative(5000))
-        ctrl1.addWidget(btn_fwd5)
-
-        ctrl1.addSpacing(12)
 
         self.btn_mute = QPushButton("🔊")
         self.btn_mute.setToolTip("Silenciar / Reactivar (M)")
         self.btn_mute.setAccessibleName("Silenciar o reactivar audio")
         self.btn_mute.clicked.connect(self.toggle_mute)
-        ctrl1.addWidget(self.btn_mute)
 
         self.slider_vol = SeekSlider(Qt.Orientation.Horizontal)
         self.slider_vol.setRange(0, 100)
         self.slider_vol.setValue(self.settings.volume())
         self.slider_vol.setFixedWidth(100)
         self.slider_vol.valueChanged.connect(self.on_volume_change)
-        ctrl1.addWidget(self.slider_vol)
-
-        ctrl1.addStretch()
 
         self.btn_loop = QPushButton("Bucle")
         self.btn_loop.setCheckable(True)
         self.btn_loop.setChecked(self.loop_video)
         self.btn_loop.setToolTip("Repetir video actual")
         self.btn_loop.clicked.connect(self.toggle_loop)
-        ctrl1.addWidget(self.btn_loop)
 
         self.btn_fs = QPushButton("Pantalla completa")
         self.btn_fs.setToolTip("Alternar pantalla completa (F / Doble Clic / Esc para salir)")
         self.btn_fs.clicked.connect(self.toggle_fullscreen)
-        ctrl1.addWidget(self.btn_fs)
 
         self.btn_split = QPushButton("Pantalla dividida")
         self.btn_split.setCheckable(True)
@@ -634,76 +657,72 @@ class ModernVideoPlayer(QMainWindow):
             "Mostrar a la vez el video y un panel de imagen independiente (D)"
         )
         self.btn_split.clicked.connect(self.toggle_split_mode)
-        ctrl1.addWidget(self.btn_split)
 
-        return ctrl1
+        row = QWidget()
+        flow = FlowLayout(row, margin=0, h_spacing=16, v_spacing=8)
+        flow.addWidget(
+            self._make_control_group(self.btn_prev, self.btn_play, self.btn_next, self.btn_stop)
+        )
+        flow.addWidget(self._make_control_group(btn_back5, btn_fwd5))
+        flow.addWidget(self._make_control_group(self.btn_mute, self.slider_vol))
+        flow.addWidget(self._make_control_group(self.btn_loop, self.btn_fs, self.btn_split))
+        return row
 
-    def _build_rotation_zoom_speed_row(self) -> QHBoxLayout:
-        """Fila 2: giro, zoom/relleno y velocidad de reproducción."""
-        ctrl2 = QHBoxLayout()
-        ctrl2.setSpacing(8)
+    def _build_rotation_zoom_speed_row(self) -> QWidget:
+        """Fila 2: giro, zoom/relleno y velocidad de reproducción.
 
+        QWidget con FlowLayout: los tres grupos (Giro / Zoom / Velocidad)
+        bajan de línea completos si no caben todos juntos en el ancho
+        actual del panel, en vez de que el texto de los últimos botones
+        quede cortado a la mitad.
+        """
         cap_giro = QLabel("Giro")
         cap_giro.setObjectName("groupCaption")
-        ctrl2.addWidget(cap_giro)
 
         btn_ccw = QPushButton("↺ 90°")
         btn_ccw.setToolTip("Girar antihorario (Shift+R)")
         btn_ccw.setAccessibleName("Girar video antihorario 90 grados")
         btn_ccw.clicked.connect(lambda: self.rotate_video(-90))
-        ctrl2.addWidget(btn_ccw)
 
         btn_cw = QPushButton("↻ 90°")
         btn_cw.setToolTip("Girar horario (R)")
         btn_cw.setAccessibleName("Girar video horario 90 grados")
         btn_cw.clicked.connect(lambda: self.rotate_video(90))
-        ctrl2.addWidget(btn_cw)
 
         btn_180 = QPushButton("180°")
         btn_180.clicked.connect(lambda: self.rotate_video(180))
-        ctrl2.addWidget(btn_180)
 
         self.lbl_rot = QLabel("0°")
         self.lbl_rot.setObjectName("statLabel")
-        ctrl2.addWidget(self.lbl_rot)
 
         btn_reset_rot = QPushButton("Restablecer")
         btn_reset_rot.clicked.connect(lambda: self.set_rotation_absolute(0))
-        ctrl2.addWidget(btn_reset_rot)
 
-        self.btn_flip = QPushButton("⇋ Espejo")
+        self.btn_flip = QPushButton("↔ Espejo")
         self.btn_flip.setCheckable(True)
         self.btn_flip.setToolTip("Espejar el video horizontalmente")
         self.btn_flip.setAccessibleName("Espejar video horizontalmente")
         self.btn_flip.clicked.connect(self.toggle_video_flip)
-        ctrl2.addWidget(self.btn_flip)
-
-        ctrl2.addSpacing(16)
 
         cap_zoom = QLabel("Zoom")
         cap_zoom.setObjectName("groupCaption")
-        ctrl2.addWidget(cap_zoom)
 
         btn_zoom_out = QPushButton("−")
         btn_zoom_out.setToolTip("Alejar (Ctrl + Rueda abajo / -)")
         btn_zoom_out.setAccessibleName("Alejar video")
         btn_zoom_out.clicked.connect(lambda: self.adjust_zoom(-1))
-        ctrl2.addWidget(btn_zoom_out)
 
         self.lbl_zoom = QLabel("100%")
         self.lbl_zoom.setObjectName("statLabel")
-        ctrl2.addWidget(self.lbl_zoom)
 
         btn_zoom_in = QPushButton("+")
         btn_zoom_in.setToolTip("Acercar (Ctrl + Rueda arriba / +)")
         btn_zoom_in.setAccessibleName("Acercar video")
         btn_zoom_in.clicked.connect(lambda: self.adjust_zoom(1))
-        ctrl2.addWidget(btn_zoom_in)
 
         btn_zoom_reset = QPushButton("Restablecer")
         btn_zoom_reset.setToolTip("Restablecer zoom y posición (0)")
         btn_zoom_reset.clicked.connect(self.reset_zoom)
-        ctrl2.addWidget(btn_zoom_reset)
 
         self.btn_fill = QPushButton("Llenar pantalla")
         self.btn_fill.setCheckable(True)
@@ -712,13 +731,9 @@ class ModernVideoPlayer(QMainWindow):
             "Alternar: llenar todo el panel (recorta) / ajustar completo (barras negras)"
         )
         self.btn_fill.clicked.connect(self.toggle_fill_mode)
-        ctrl2.addWidget(self.btn_fill)
-
-        ctrl2.addSpacing(16)
 
         cap_spd = QLabel("Velocidad")
         cap_spd.setObjectName("groupCaption")
-        ctrl2.addWidget(cap_spd)
 
         # Escala de niveles enteros del 1 al 40 (1 decimo de velocidad por
         # nivel): 10 es "Normal", bajar es retraso (9, 8, 7...) y subir es
@@ -726,24 +741,41 @@ class ModernVideoPlayer(QMainWindow):
         btn_slower = QPushButton("◀ Retraso")
         btn_slower.setToolTip("Bajar un nivel (más lento) ([)")
         btn_slower.clicked.connect(self.decrease_speed)
-        ctrl2.addWidget(btn_slower)
 
         self.lbl_spd = QLabel("10 (Normal)")
         self.lbl_spd.setObjectName("statLabel")
-        ctrl2.addWidget(self.lbl_spd)
 
         btn_faster = QPushButton("Avance ▶")
         btn_faster.setToolTip("Subir un nivel (más rápido) (])")
         btn_faster.clicked.connect(self.increase_speed)
-        ctrl2.addWidget(btn_faster)
 
         btn_reset_spd = QPushButton("10 (Normal)")
         btn_reset_spd.setToolTip("Volver al nivel normal (Backspace)")
         btn_reset_spd.clicked.connect(self.reset_speed)
-        ctrl2.addWidget(btn_reset_spd)
 
-        ctrl2.addStretch()
-        return ctrl2
+        row = QWidget()
+        flow = FlowLayout(row, margin=0, h_spacing=16, v_spacing=8)
+        flow.addWidget(
+            self._make_control_group(
+                cap_giro, btn_ccw, btn_cw, btn_180, self.lbl_rot, btn_reset_rot, self.btn_flip
+            )
+        )
+        flow.addWidget(
+            self._make_control_group(
+                cap_zoom,
+                btn_zoom_out,
+                self.lbl_zoom,
+                btn_zoom_in,
+                btn_zoom_reset,
+                self.btn_fill,
+            )
+        )
+        flow.addWidget(
+            self._make_control_group(
+                cap_spd, btn_slower, self.lbl_spd, btn_faster, btn_reset_spd
+            )
+        )
+        return row
 
     def _build_side_panel(self) -> QWidget:
         """Panel lateral: dos pestañas separadas, una por cada galería.
