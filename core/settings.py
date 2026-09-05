@@ -87,6 +87,36 @@ class AppSettings:
     def set_split_mode(self, value: bool) -> None:
         self._s.setValue("layout/split_mode", value)
 
+    # --- Tamaños de paneles (splitters ajustables por el usuario) ---------
+    def _read_int_list(self, key: str) -> Optional[List[int]]:
+        """Lee una lista de enteros guardada por un QSplitter.saveState()
+        equivalente manual (sizes()). Tolerante a valores corruptos o
+        ausentes: devuelve None para que el llamador use su propio
+        reparto por defecto en vez de fallar."""
+        raw = self._s.value(key)
+        if not raw:
+            return None
+        try:
+            sizes = [int(v) for v in raw]
+        except (TypeError, ValueError):
+            logger.warning("Tamaños de panel corruptos en settings (%s); se ignoran", key)
+            return None
+        return sizes if all(s >= 0 for s in sizes) else None
+
+    def main_splitter_sizes(self) -> Optional[List[int]]:
+        """Reparto guardado entre el área de medios y la galería."""
+        return self._read_int_list("layout/main_splitter_sizes")
+
+    def set_main_splitter_sizes(self, sizes: List[int]) -> None:
+        self._s.setValue("layout/main_splitter_sizes", [int(s) for s in sizes])
+
+    def media_splitter_sizes(self) -> Optional[List[int]]:
+        """Reparto guardado entre el panel de video y el de imagen."""
+        return self._read_int_list("layout/media_splitter_sizes")
+
+    def set_media_splitter_sizes(self, sizes: List[int]) -> None:
+        self._s.setValue("layout/media_splitter_sizes", [int(s) for s in sizes])
+
     # --- Sesión ----------------------------------------------------------
     def last_folder(self) -> str:
         return str(self._s.value("session/last_folder", ""))
