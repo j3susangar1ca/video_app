@@ -194,3 +194,47 @@ class ThumbWorker(QRunnable):
             "ffmpeg devolvió código %s para %s", res.returncode, self.file_path
         )
         return None
+
+
+class ImageThumbSignals(QObject):
+    # Misma forma que ThumbSignals: QImage, seguro entre hilos.
+    finished = pyqtSignal(str, QImage)
+
+
+class ImageThumbWorker(QRunnable):
+    """Genera la miniatura de una imagen (galería de fotos).
+
+    A diferencia de ThumbWorker (video, necesita ffmpeg + subprocess),
+    aquí basta con cargar el archivo y reescalarlo: no hace falta caché
+    en disco porque decodificar y reescalar una imagen ya es barato de
+    por sí. Se hace en un QRunnable de todos modos para no bloquear la
+    GUI si el usuario carga muchas fotos grandes de golpe.
+    """
+
+    def __init__(self, file_path: str):
+        super().__init__()
+        self.file_path = file_path
+        self.signals = ImageThumbSignals()
+
+    def run(self):
+        try:
+            img = QImage(self.file_path)
+            if img.isNull():
+                self.signals.finished.emit(self.file_path, fallback_thumb())
+                return
+            scaled = img.scaled(
+                THUMB_W,
+                THUMB_H,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.signals.finished.emit(self.file_path, scaled)
+        except Exception:
+            logger.exception(
+                "Fallo generando miniatura de imagen para %s", self.file_path
+            )
+            try:
+                self.signals.finished.emit(self.file_path, fallback_thumb())
+            except RuntimeError:
+                # La app se cerró mientras el worker corría: nada que hacer.
+                pass
