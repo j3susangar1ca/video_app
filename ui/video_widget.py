@@ -15,6 +15,10 @@ Mejoras respecto a la versión anterior:
     press→release→doubleClick→release para una secuencia de doble clic.
     El clic simple ahora se retrasa el intervalo estándar de doble clic
     y se cancela si llega a confirmarse un doble clic.
+  - `placeholder_text` configurable: el widget se reutiliza tal cual
+    para el panel de imagen en modo pantalla dividida (misma lógica de
+    rotación/zoom/paneo/relleno, solo cambia el mensaje cuando no hay
+    contenido cargado).
 """
 from __future__ import annotations
 
@@ -35,8 +39,11 @@ class DirectVideoWidget(QWidget):
     # Movimiento máximo (px) que se sigue considerando "clic" y no paneo.
     CLICK_THRESHOLD = 6.0
 
-    def __init__(self, parent=None):
+    DEFAULT_PLACEHOLDER = "Arrastra videos o carpetas aquí\no usa el botón 'Agregar videos'"
+
+    def __init__(self, parent=None, placeholder_text: Optional[str] = None):
         super().__init__(parent)
+        self.placeholder_text = placeholder_text or self.DEFAULT_PLACEHOLDER
         self.current_frame: Optional[QImage] = None
         self.rotation_angle = 0
         self.zoom_factor = 1.0
@@ -98,7 +105,7 @@ class DirectVideoWidget(QWidget):
             painter.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
-                "Arrastra videos o carpetas aquí\no usa el botón 'Agregar videos'",
+                self.placeholder_text,
             )
             return
 
