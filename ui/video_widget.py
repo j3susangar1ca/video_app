@@ -10,14 +10,19 @@ Mejoras respecto a la versión anterior:
     completa.
   - El texto de placeholder usa la fuente por defecto del sistema
     ("-apple-system" no existe en Linux).
+  - Bug corregido: un doble clic (pantalla completa) generaba también un
+    clic simple de por medio (play/pausa), porque Qt siempre entrega
+    press→release→doubleClick→release para una secuencia de doble clic.
+    El clic simple ahora se retrasa el intervalo estándar de doble clic
+    y se cancela si llega a confirmarse un doble clic.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QPainter
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QApplication, QWidget
 
 
 class DirectVideoWidget(QWidget):
@@ -41,6 +46,11 @@ class DirectVideoWidget(QWidget):
         self._press_pos: Optional[QPointF] = None
         self._pan_start = (0.0, 0.0)
         self._moved = False
+        # Retardo del clic simple para poder cancelarlo si resulta ser la
+        # primera mitad de un doble clic (ver mouseReleaseEvent).
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.timeout.connect(self.clicked.emit)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -152,11 +162,15 @@ class DirectVideoWidget(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             if self._press_pos is not None and not self._moved:
-                self.clicked.emit()
+                # No emitir todavía: si esto es la primera mitad de un
+                # doble clic, mouseDoubleClickEvent cancelará este timer
+                # antes de que dispare, evitando un play/pausa espurio.
+                self._click_timer.start(QApplication.doubleClickInterval())
             self._press_pos = None
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self._click_timer.stop()
             self.doubleClicked.emit()
 
     def wheelEvent(self, event):
