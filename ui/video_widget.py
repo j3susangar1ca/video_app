@@ -192,6 +192,13 @@ class DirectVideoWidget(QWidget):
     def resizeEvent(self, event):
         self._clamp_pan()
         super().resizeEvent(event)
+        # Forzado explícito: en algunos gestores de ventanas de Linux, un
+        # cambio de tamaño disparado por maximizar/restaurar la ventana
+        # (en vez de un arrastre manual del usuario) no siempre programa
+        # el repintado completo por sí solo, dejando el widget mostrando
+        # el frame anterior a medio recuadrar hasta el siguiente frame de
+        # video. Pedirlo aquí es barato (una vez por resize, no por frame).
+        self.update()
 
     # ------------------------------------------------------------------
     # Internos

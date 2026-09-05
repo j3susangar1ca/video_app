@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 import os
 
-from PyQt6.QtCore import QSize, Qt, QTimer, QThreadPool, QUrl
+from PyQt6.QtCore import QEvent, QSize, Qt, QTimer, QThreadPool, QUrl
 from PyQt6.QtGui import (
     QDesktopServices,
     QIcon,
@@ -177,6 +177,10 @@ class ModernVideoPlayer(QMainWindow):
         self.is_seeking = False
         self.loop_video = self.settings.loop()
         self.items_map = {}
+        # Recuerda si la ventana estaba maximizada antes de entrar en
+        # pantalla completa, para poder volver a ese mismo estado al
+        # salir (ver toggle_fullscreen).
+        self._was_maximized_before_fullscreen = False
 
         # Estado del panel de imagen (pantalla dividida), completamente
         # independiente del estado del reproductor de video de arriba.
@@ -242,7 +246,17 @@ class ModernVideoPlayer(QMainWindow):
 
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_gallery_panel())
-        splitter.setSizes([900, 360])
+        # Ninguno de los dos paneles es fijo: el usuario arrastra el
+        # separador para ajustarlos a su gusto (ver QSplitter::handle en
+        # ui/theme.py). setChildrenCollapsible(False) evita que un
+        # arrastre accidental haga desaparecer un panel entero y deje la
+        # ventana con aspecto roto/a medias.
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        saved_sizes = self.settings.main_splitter_sizes()
+        splitter.setSizes(saved_sizes if saved_sizes else [900, 360])
+        self.main_splitter = splitter
 
         # Aplicar el estado guardado de "llenar pantalla" al widget de video
         self.video_view.set_fill_mode(self.btn_fill.isChecked())
@@ -279,7 +293,14 @@ class ModernVideoPlayer(QMainWindow):
         self.media_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.media_splitter.addWidget(self._build_video_panel())
         self.media_splitter.addWidget(self._build_image_panel())
-        self.media_splitter.setSizes([1, 1])
+        # Igual que el splitter principal: ajustable a mano, nunca fijo,
+        # y no colapsable para que arrastrar el separador hasta el borde
+        # no haga desaparecer uno de los dos paneles por accidente.
+        self.media_splitter.setChildrenCollapsible(False)
+        self.media_splitter.setStretchFactor(0, 1)
+        self.media_splitter.setStretchFactor(1, 1)
+        saved_media_sizes = self.settings.media_splitter_sizes()
+        self.media_splitter.setSizes(saved_media_sizes if saved_media_sizes else [1, 1])
         left_layout.addWidget(self.media_splitter, stretch=1)
 
         # La pantalla dividida es opcional: el panel de imagen arranca
@@ -291,6 +312,11 @@ class ModernVideoPlayer(QMainWindow):
     def _build_video_panel(self) -> QWidget:
         """Panel de video: área de reproducción + controles inferiores."""
         video_box = QWidget()
+        # Ancho mínimo generoso (no fijo: sigue siendo libremente ajustable
+        # por encima de este valor) para que el panel de video nunca quede
+        # aplastado a un tamaño inutilizable al repartir espacio con el de
+        # imagen o la galería.
+        video_box.setMinimumWidth(280)
         video_layout = QVBoxLayout(video_box)
         video_layout.setContentsMargins(0, 0, 0, 0)
         video_layout.setSpacing(10)
@@ -317,6 +343,12 @@ class ModernVideoPlayer(QMainWindow):
         controls_layout.addLayout(self._build_rotation_zoom_speed_row())
 
         self.controls_panel = controls_panel
+        # El ratón "descansando" sobre los controles (p. ej. mientras se
+        # arrastra el volumen) no cuenta como inactividad: sin esto, el
+        # temporizador de auto-ocultado en pantalla completa podía seguir
+        # corriendo y esconder la barra justo debajo del cursor mientras
+        # el usuario la estaba usando. Ver eventFilter().
+        self.controls_panel.installEventFilter(self)
         apply_elevation(self.controls_panel, level=1)
         video_layout.addWidget(self.controls_panel)
         return video_box
@@ -329,6 +361,7 @@ class ModernVideoPlayer(QMainWindow):
         de duplicar esa lógica de pintado en una clase nueva.
         """
         image_box = QWidget()
+        image_box.setMinimumWidth(280)
         image_layout = QVBoxLayout(image_box)
         image_layout.setContentsMargins(0, 0, 0, 0)
         image_layout.setSpacing(10)
@@ -683,6 +716,7 @@ class ModernVideoPlayer(QMainWindow):
         contenido de la galería.
         """
         right_box = QWidget()
+        right_box.setMinimumWidth(220)
         right_layout = QVBoxLayout(right_box)
         right_layout.setContentsMargins(8, 12, 12, 12)
         right_layout.setSpacing(8)
@@ -885,6 +919,10 @@ class ModernVideoPlayer(QMainWindow):
         self.settings.set_playlist_paths(self.current_playlist_paths())
         self.settings.set_split_mode(self.split_mode)
         self.settings.set_image_paths(self.image_paths)
+        # Los paneles son ajustables por el usuario (splitters, no tamaños
+        # fijos): se recuerda cómo los dejó para la próxima sesión.
+        self.settings.set_main_splitter_sizes(self.main_splitter.sizes())
+        self.settings.set_media_splitter_sizes(self.media_splitter.sizes())
         self.settings.sync()
 
         # Liberar recursos y salir rápido: sin miniaturas pendientes.
@@ -1242,9 +1280,20 @@ class ModernVideoPlayer(QMainWindow):
     # ------------------------------------------------------------------
     def toggle_fullscreen(self):
         if self.isFullScreen():
-            self.showNormal()
+            # showNormal() siempre vuelve al tamaño "normal" (no maximizado)
+            # de la ventana. Si el usuario había maximizado la ventana
+            # ANTES de entrar en pantalla completa, eso perdía ese estado:
+            # Qt/la ventana quedaban en tamaños distintos a los que el
+            # gestor de ventanas seguía creyendo, y la ventana aparecía
+            # renderizada solo a medias o con el contenido descuadrado.
+            # Se restaura el estado que tenía justo antes de F.
+            if self._was_maximized_before_fullscreen:
+                self.showMaximized()
+            else:
+                self.showNormal()
             self._restore_normal_ui()
         else:
+            self._was_maximized_before_fullscreen = self.isMaximized()
             self.showFullScreen()
             self._enter_fullscreen_ui()
 
@@ -1279,6 +1328,45 @@ class ModernVideoPlayer(QMainWindow):
             self.controls_panel.hide()
             # Cursor invisible sobre el video para experiencia de cine.
             self.video_view.setCursor(Qt.CursorShape.BlankCursor)
+
+    def changeEvent(self, event):
+        """Al maximizar/restaurar la ventana (o al entrar/salir de pantalla
+        completa) algunos gestores de ventanas de Linux dejan el backing
+        store de Qt con una región vieja sin repintar hasta el siguiente
+        evento: la app se ve "cortada por la mitad" un instante (o hasta
+        el siguiente frame de video). Se fuerza un redibujado completo de
+        los paneles principales en cuanto el bucle de eventos procesa el
+        cambio de geometría (no se puede hacer de forma síncrona: la
+        geometría nueva todavía no está asentada dentro de este mismo
+        evento)."""
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            QTimer.singleShot(0, self._force_full_repaint)
+
+    def _force_full_repaint(self):
+        central = self.centralWidget()
+        if central is not None:
+            central.updateGeometry()
+        self.video_view.update()
+        self.image_view.update()
+        self.update()
+
+    def eventFilter(self, obj, event):
+        """Mientras el cursor está POSADO sobre la barra de controles
+        (arrastrando el volumen, apuntando a un botón...) nunca debe
+        desaparecer: se detiene el temporizador de auto-ocultado al
+        entrar y se retoma solo al salir de sus límites. Antes el
+        temporizador solo se reiniciaba con el movimiento del ratón
+        sobre el VIDEO, así que si el usuario se quedaba quieto sobre los
+        propios controles, estos se escondían debajo del cursor a mitad
+        de una interacción.
+        """
+        if obj is self.controls_panel:
+            if event.type() == QEvent.Type.Enter:
+                self._hide_controls_timer.stop()
+            elif event.type() == QEvent.Type.Leave and self.isFullScreen():
+                self._hide_controls_timer.start(AUTOHIDE_CONTROLS_MS)
+        return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------------
     # Gestión de galería

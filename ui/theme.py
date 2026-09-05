@@ -143,13 +143,28 @@ QMainWindow, QWidget {
 }
 
 /* ---------- Contenedores tipo tarjeta ---------- */
+/* Los paneles (video/imagen/galería) son ajustables por el usuario
+   arrastrando estos separadores. 1px era casi imposible de "agarrar"
+   con el ratón y hacía que los paneles parecieran fijos; 6px deja
+   margen de sobra para el arrastre y sigue leyendo como una línea
+   fina gracias al color de fondo. */
 QSplitter::handle {
     background-color: $border;
-    width: 1px;
+    width: 6px;
+    margin: 2px 0;
+    border-radius: 2px;
+}
+
+QSplitter::handle:horizontal {
+    width: 6px;
+}
+
+QSplitter::handle:vertical {
+    height: 6px;
 }
 
 QSplitter::handle:hover {
-    background-color: $border_hover;
+    background-color: $accent;
 }
 
 /* Paneles de controles (debajo del video/imagen) y galería: tarjetas
