@@ -51,10 +51,14 @@ class AppSettings:
         self._s.setValue("playback/volume", max(0, min(100, int(value))))
 
     def speed_index(self) -> int:
+        # Por defecto, índice 9 = nivel 10 ("Normal", 1.0x) en la escala
+        # entera 1-40 de ui.main_window.ModernVideoPlayer.speeds. Si el
+        # valor guardado viene de una versión anterior (escala distinta)
+        # y queda fuera de rango, quien llama (init_ui) lo reajusta solo.
         try:
-            return int(self._s.value("playback/speed_index", 3))
+            return int(self._s.value("playback/speed_index", 9))
         except (TypeError, ValueError):
-            return 3
+            return 9
 
     def set_speed_index(self, value: int) -> None:
         self._s.setValue("playback/speed_index", value)

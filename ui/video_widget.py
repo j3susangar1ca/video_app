@@ -47,6 +47,7 @@ class DirectVideoWidget(QWidget):
         self.current_frame: Optional[QImage] = None
         self.rotation_angle = 0
         self.zoom_factor = 1.0
+        self.flip_h = False  # espejo horizontal (independiente del giro)
         self.fill_mode = True  # True = "cover" (llena), False = "contain"
         self.pan_x = 0.0
         self.pan_y = 0.0
@@ -76,6 +77,14 @@ class DirectVideoWidget(QWidget):
     def set_zoom(self, zoom: float):
         self.zoom_factor = max(0.2, min(8.0, zoom))
         self._clamp_pan()
+        self.update()
+
+    def set_flip_horizontal(self, flip: bool):
+        """Espeja el contenido en el eje horizontal, independiente del
+        giro: se aplica ANTES de rotate() para que sea siempre un espejo
+        horizontal del contenido original, sin importar qué rotación
+        tenga aplicada encima."""
+        self.flip_h = flip
         self.update()
 
     def reset_view(self):
@@ -135,6 +144,8 @@ class DirectVideoWidget(QWidget):
         dest_h = img_h * scale
 
         painter.translate(w_w / 2.0 + self.pan_x, w_h / 2.0 + self.pan_y)
+        if self.flip_h:
+            painter.scale(-1, 1)
         painter.rotate(self.rotation_angle)
         painter.drawImage(
             QRectF(-dest_w / 2.0, -dest_h / 2.0, dest_w, dest_h), self.current_frame

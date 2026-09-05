@@ -38,6 +38,19 @@ Tercera pasada (UI/UX y accesibilidad, ver AUDIT_UX.md):
     imagen: reproducir/quitar y "Abrir carpeta contenedora" (integración
     con el gestor de archivos vía QDesktopServices, patrón nativo de
     escritorio Linux).
+
+Cuarta pasada (espejo, galería de imágenes propia, velocidad en niveles):
+  - Espejo horizontal, independiente del giro, para video e imagen
+    (ver DirectVideoWidget.set_flip_horizontal).
+  - Panel lateral dividido en dos pestañas (QTabWidget): "Videos" (la
+    galería de siempre) e "Imágenes" (nueva), cada una con su propia
+    lista, miniaturas, menú contextual y estado vacío. Antes la única
+    forma de cargar/gestionar fotos era el panel de pantalla dividida;
+    ahora también tienen galería propia, con "Quitar" y "Quitar todo".
+  - Velocidad de reproducción en escala de NIVELES enteros (1-40, cada
+    uno un décimo de velocidad real) en vez de saltos sueltos como
+    .25/.75/.50: el nivel 10 es "Normal", bajar de ahí es "Retraso"
+    (9, 8, 7...) y subir es "Avance" (11, 12...).
 """
 from __future__ import annotations
 
@@ -67,12 +80,13 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStyle,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from core.settings import AppSettings
-from core.thumbnail_cache import ThumbWorker, fallback_thumb
+from core.thumbnail_cache import ImageThumbWorker, ThumbWorker, fallback_thumb
 from ui.theme import apply_elevation
 from ui.video_widget import DirectVideoWidget
 
@@ -172,7 +186,12 @@ class ModernVideoPlayer(QMainWindow):
 
         self.current_rotation = 0
         self.zoom_level = 1.0
-        self.speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0]
+        # Escala de velocidad en NIVELES enteros de 1 a 40 (no fracciones
+        # sueltas como .25/.75/.50): cada nivel es un décimo de velocidad
+        # real, así que el nivel 10 es "Normal" (1.0x) y bajar de ahí es
+        # "retraso" (9, 8, 7... más lento) tan fino como subir es "avance"
+        # (11, 12... más rápido), en pasos parejos de 0.1x.
+        self.speeds = list(range(1, 41))
         self.speed_idx = self.settings.speed_index()
         self.is_seeking = False
         self.loop_video = self.settings.loop()
@@ -189,6 +208,9 @@ class ModernVideoPlayer(QMainWindow):
         self.image_index = -1
         self.image_rotation = 0
         self.image_zoom = 1.0
+        # path -> QListWidgetItem de self.image_gallery (pestaña
+        # "Imágenes"), igual que self.items_map para la galería de video.
+        self.image_items_map = {}
 
         self.init_player()
         self.init_ui()
@@ -245,7 +267,7 @@ class ModernVideoPlayer(QMainWindow):
         self.setCentralWidget(splitter)
 
         splitter.addWidget(self._build_left_panel())
-        splitter.addWidget(self._build_gallery_panel())
+        splitter.addWidget(self._build_side_panel())
         # Ninguno de los dos paneles es fijo: el usuario arrastra el
         # separador para ajustarlos a su gusto (ver QSplitter::handle en
         # ui/theme.py). setChildrenCollapsible(False) evita que un
@@ -266,7 +288,7 @@ class ModernVideoPlayer(QMainWindow):
 
         # Aplicar velocidad guardada
         if not (0 <= self.speed_idx < len(self.speeds)):
-            self.speed_idx = self.speeds.index(1.0)
+            self.speed_idx = self.speeds.index(10)  # nivel 10 = Normal (1.0x)
         self.apply_speed()
 
         # Barra de estado: feedback de errores y avisos al usuario
@@ -395,16 +417,16 @@ class ModernVideoPlayer(QMainWindow):
         return image_box
 
     def _build_image_nav_row(self) -> QHBoxLayout:
-        """Fila 1 del panel de imagen: cargar y navegar entre fotos."""
+        """Fila 1 del panel de imagen: navegar entre las fotos cargadas.
+
+        Cargar/quitar imágenes de la lista vive en la pestaña "Imágenes"
+        del panel lateral (ver _build_image_gallery_tab), igual que el
+        panel de video tampoco tiene un botón de "agregar" bajo el
+        reproductor: la gestión de la colección vive en la galería, este
+        panel es solo para verla y navegarla.
+        """
         row = QHBoxLayout()
         row.setSpacing(8)
-
-        btn_add_img = QPushButton("+  Cargar imágenes")
-        btn_add_img.setObjectName("primaryBtn")
-        btn_add_img.clicked.connect(self.open_image_dialog)
-        row.addWidget(btn_add_img)
-
-        row.addSpacing(8)
 
         self.btn_img_prev = QPushButton("⏮")
         self.btn_img_prev.setObjectName("transportBtn")
@@ -458,6 +480,13 @@ class ModernVideoPlayer(QMainWindow):
         self.lbl_img_rot = QLabel("0°")
         self.lbl_img_rot.setObjectName("statLabel")
         row.addWidget(self.lbl_img_rot)
+
+        self.btn_img_flip = QPushButton("⇋ Espejo")
+        self.btn_img_flip.setCheckable(True)
+        self.btn_img_flip.setToolTip("Espejar la imagen horizontalmente")
+        self.btn_img_flip.setAccessibleName("Espejar imagen horizontalmente")
+        self.btn_img_flip.clicked.connect(self.toggle_image_flip)
+        row.addWidget(self.btn_img_flip)
 
         row.addSpacing(12)
 
@@ -642,6 +671,13 @@ class ModernVideoPlayer(QMainWindow):
         btn_reset_rot.clicked.connect(lambda: self.set_rotation_absolute(0))
         ctrl2.addWidget(btn_reset_rot)
 
+        self.btn_flip = QPushButton("⇋ Espejo")
+        self.btn_flip.setCheckable(True)
+        self.btn_flip.setToolTip("Espejar el video horizontalmente")
+        self.btn_flip.setAccessibleName("Espejar video horizontalmente")
+        self.btn_flip.clicked.connect(self.toggle_video_flip)
+        ctrl2.addWidget(self.btn_flip)
+
         ctrl2.addSpacing(16)
 
         cap_zoom = QLabel("Zoom")
@@ -684,30 +720,49 @@ class ModernVideoPlayer(QMainWindow):
         cap_spd.setObjectName("groupCaption")
         ctrl2.addWidget(cap_spd)
 
-        btn_slower = QPushButton("◀ Lento")
-        btn_slower.setToolTip("Disminuir velocidad ([)")
+        # Escala de niveles enteros del 1 al 40 (1 decimo de velocidad por
+        # nivel): 10 es "Normal", bajar es retraso (9, 8, 7...) y subir es
+        # avance (11, 12...), en vez de saltos sueltos como .25/.75/.50.
+        btn_slower = QPushButton("◀ Retraso")
+        btn_slower.setToolTip("Bajar un nivel (más lento) ([)")
         btn_slower.clicked.connect(self.decrease_speed)
         ctrl2.addWidget(btn_slower)
 
-        self.lbl_spd = QLabel("1.00x")
+        self.lbl_spd = QLabel("10 (Normal)")
         self.lbl_spd.setObjectName("statLabel")
         ctrl2.addWidget(self.lbl_spd)
 
-        btn_faster = QPushButton("Rápido ▶")
-        btn_faster.setToolTip("Aumentar velocidad (])")
+        btn_faster = QPushButton("Avance ▶")
+        btn_faster.setToolTip("Subir un nivel (más rápido) (])")
         btn_faster.clicked.connect(self.increase_speed)
         ctrl2.addWidget(btn_faster)
 
-        btn_reset_spd = QPushButton("1.0x")
-        btn_reset_spd.setToolTip("Velocidad normal (Backspace)")
+        btn_reset_spd = QPushButton("10 (Normal)")
+        btn_reset_spd.setToolTip("Volver al nivel normal (Backspace)")
         btn_reset_spd.clicked.connect(self.reset_speed)
         ctrl2.addWidget(btn_reset_spd)
 
         ctrl2.addStretch()
         return ctrl2
 
-    def _build_gallery_panel(self) -> QWidget:
-        """Panel derecho: galería de videos y sus acciones.
+    def _build_side_panel(self) -> QWidget:
+        """Panel lateral: dos pestañas separadas, una por cada galería.
+
+        Antes solo existía la galería de video; ahora la de imágenes vive
+        aquí también, en su propia pestaña, en vez de que la única forma
+        de cargar/gestionar fotos fuera el panel de pantalla dividida.
+        Ambas pestañas conviven en el mismo QTabWidget (self.right_panel),
+        que es lo que se oculta/muestra al entrar y salir de pantalla
+        completa — igual que antes.
+        """
+        tabs = QTabWidget()
+        tabs.addTab(self._build_video_gallery_tab(), "Videos")
+        tabs.addTab(self._build_image_gallery_tab(), "Imágenes")
+        self.right_panel = tabs
+        return tabs
+
+    def _build_video_gallery_tab(self) -> QWidget:
+        """Pestaña "Videos": galería de video y sus acciones.
 
         Incluye un estado vacío real (antes una lista en blanco no daba
         ninguna pista de qué hacer) implementado con QStackedWidget: la
@@ -756,7 +811,6 @@ class ModernVideoPlayer(QMainWindow):
         row_actions.addWidget(btn_clear)
         right_layout.addLayout(row_actions)
 
-        self.right_panel = right_box
         self._update_gallery_empty_state()
         return right_box
 
@@ -783,6 +837,115 @@ class ModernVideoPlayer(QMainWindow):
     def _update_gallery_empty_state(self):
         """Alterna entre la lista y el mensaje de estado vacío."""
         self.playlist_stack.setCurrentIndex(0 if self.playlist.count() > 0 else 1)
+
+    def _build_image_gallery_tab(self) -> QWidget:
+        """Pestaña "Imágenes": galería de fotos y sus acciones.
+
+        Mismo patrón que la pestaña de video (lista + estado vacío vía
+        QStackedWidget, menú contextual, miniaturas), pero para el panel
+        de imagen de pantalla dividida: seleccionar/activar un elemento
+        aquí lo muestra en ese panel (activando pantalla dividida si
+        hiciera falta), y "Quitar todo" limpia la colección entera de una
+        vez, algo que antes no existía (solo se podía quitar de una en
+        una desde el panel de imagen).
+        """
+        box = QWidget()
+        box.setMinimumWidth(220)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 12, 12, 12)
+        layout.setSpacing(8)
+
+        lbl = QLabel("Galería de imágenes")
+        lbl.setObjectName("sectionTitle")
+        layout.addWidget(lbl)
+
+        self.image_gallery = QListWidget()
+        self.image_gallery.setIconSize(QSize(130, 75))
+        self.image_gallery.itemActivated.connect(self.activate_image_item)
+        self.image_gallery.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.image_gallery.customContextMenuRequested.connect(
+            self._show_image_gallery_context_menu
+        )
+        apply_elevation(self.image_gallery, level=2)
+
+        self.image_gallery_stack = QStackedWidget()
+        self.image_gallery_stack.addWidget(self.image_gallery)
+        self.image_gallery_stack.addWidget(self._build_image_gallery_empty_state())
+        layout.addWidget(self.image_gallery_stack)
+
+        btn_add_img = QPushButton("+  Cargar imágenes")
+        btn_add_img.setObjectName("primaryBtn")
+        btn_add_img.clicked.connect(self.open_image_dialog)
+        apply_elevation(btn_add_img, level=1)
+        layout.addWidget(btn_add_img)
+
+        row_actions = QHBoxLayout()
+        btn_remove = QPushButton("Quitar")
+        btn_remove.setObjectName("dangerBtn")
+        btn_remove.setToolTip(
+            "Quitar las imágenes seleccionadas (doble clic o Enter para mostrarla)"
+        )
+        btn_remove.clicked.connect(self.remove_selected_images)
+        row_actions.addWidget(btn_remove)
+
+        btn_clear = QPushButton("Quitar todo")
+        btn_clear.setObjectName("dangerBtn")
+        btn_clear.setToolTip("Quitar TODAS las imágenes de la galería")
+        btn_clear.clicked.connect(self.clear_all_images)
+        row_actions.addWidget(btn_clear)
+        layout.addLayout(row_actions)
+
+        self._update_image_gallery_empty_state()
+        return box
+
+    def _build_image_gallery_empty_state(self) -> QWidget:
+        """Página del QStackedWidget mostrada cuando no hay imágenes."""
+        empty = QWidget()
+        empty.setObjectName("emptyState")
+        layout = QVBoxLayout(empty)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(8)
+
+        title = QLabel("Sin imágenes todavía")
+        title.setObjectName("emptyStateTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        hint = QLabel("Arrastra imágenes aquí,\no usa “+ Cargar imágenes” abajo")
+        hint.setObjectName("emptyStateHint")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint)
+
+        return empty
+
+    def _update_image_gallery_empty_state(self):
+        """Alterna entre la lista y el mensaje de estado vacío."""
+        self.image_gallery_stack.setCurrentIndex(
+            0 if self.image_gallery.count() > 0 else 1
+        )
+
+    def _show_image_gallery_context_menu(self, pos):
+        """Menú contextual (clic derecho) de la galería de imágenes."""
+        item = self.image_gallery.itemAt(pos)
+        menu = QMenu(self)
+        if item is not None:
+            act_show = menu.addAction("Mostrar")
+            act_show.triggered.connect(lambda: self.activate_image_item(item))
+            act_open_folder = menu.addAction("Abrir carpeta contenedora")
+            act_open_folder.triggered.connect(
+                lambda: self._open_containing_folder(item.data(Qt.ItemDataRole.UserRole))
+            )
+            menu.addSeparator()
+            act_remove = menu.addAction("Quitar de la galería")
+            act_remove.triggered.connect(lambda: self._remove_image_gallery_item(item))
+        else:
+            act_add = menu.addAction("Cargar imágenes…")
+            act_add.triggered.connect(self.open_image_dialog)
+        if self.image_gallery.count() > 0:
+            menu.addSeparator()
+            act_clear = menu.addAction("Quitar todas las imágenes")
+            act_clear.triggered.connect(self.clear_all_images)
+        menu.exec(self.image_gallery.viewport().mapToGlobal(pos))
 
     def _show_playlist_context_menu(self, pos):
         """Menú contextual (clic derecho) de la galería de video."""
@@ -1231,6 +1394,10 @@ class ModernVideoPlayer(QMainWindow):
         self.video_view.set_fill_mode(fill)
         self.btn_fill.setText("Llenar pantalla" if fill else "Ajustar completo")
 
+    def toggle_video_flip(self):
+        """Espejo horizontal del video, independiente del giro."""
+        self.video_view.set_flip_horizontal(self.btn_flip.isChecked())
+
     # ------------------------------------------------------------------
     # Velocidad
     # ------------------------------------------------------------------
@@ -1245,13 +1412,26 @@ class ModernVideoPlayer(QMainWindow):
             self.apply_speed()
 
     def reset_speed(self):
-        self.speed_idx = self.speeds.index(1.0)
+        self.speed_idx = self.speeds.index(10)  # nivel 10 = Normal (1.0x)
         self.apply_speed()
 
     def apply_speed(self):
-        spd = self.speeds[self.speed_idx]
-        self.media_player.setPlaybackRate(spd)
-        self.lbl_spd.setText(f"{spd:.2f}x")
+        """Aplica el nivel actual (escala entera 1-40, 10 = Normal).
+
+        Internamente QMediaPlayer sigue necesitando un multiplicador real
+        (nivel / 10), pero de cara al usuario todo se expresa en el nivel
+        entero: "Normal" en 10, "Retraso N" por debajo (más lento) y
+        "Avance N" por encima (más rápido), nunca en fracciones sueltas.
+        """
+        level = self.speeds[self.speed_idx]
+        rate = level / 10.0
+        self.media_player.setPlaybackRate(rate)
+        if level == 10:
+            self.lbl_spd.setText("10 (Normal)")
+        elif level < 10:
+            self.lbl_spd.setText(f"{level} (Retraso)")
+        else:
+            self.lbl_spd.setText(f"{level} (Avance)")
 
     # ------------------------------------------------------------------
     # Volumen (mute real, independiente del nivel)
@@ -1426,7 +1606,8 @@ class ModernVideoPlayer(QMainWindow):
     # Panel de imagen (independiente del video)
     # ------------------------------------------------------------------
     def add_image_paths(self, paths, show_first: bool = True):
-        """Agrega imágenes al panel de imagen (deduplicando por ruta).
+        """Agrega imágenes al panel de imagen Y a la galería de la pestaña
+        "Imágenes" (deduplicando por ruta, igual que add_paths con video).
 
         `show_first=False` se usa al restaurar la galería guardada o al
         recibir un drop mixto video+imagen, para no interrumpir lo que ya
@@ -1438,13 +1619,46 @@ class ModernVideoPlayer(QMainWindow):
         if not added:
             return
 
+        placeholder = QIcon(QPixmap.fromImage(fallback_thumb()))
+        for path in added:
+            name = os.path.basename(path)
+            item = QListWidgetItem(placeholder, f" {name}")
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(path)
+            self.image_gallery.addItem(item)
+            self.image_items_map[path] = item
+
+            worker = ImageThumbWorker(path)
+            worker.signals.finished.connect(self.on_image_thumb_ready)
+            self.thread_pool.start(worker)
+
         self.image_paths.extend(added)
         logger.info("%d imagen(es) nueva(s) agregada(s) al panel de imagen", len(added))
+        self._update_image_gallery_empty_state()
 
         if show_first:
             self.show_image_at(len(self.image_paths) - len(added))
         else:
             self._update_image_counter()
+
+    def on_image_thumb_ready(self, path: str, image):
+        """Igual que on_thumb_ready pero para la galería de imágenes."""
+        item = self.image_items_map.get(path)
+        if item is not None and image is not None and not image.isNull():
+            item.setIcon(QIcon(QPixmap.fromImage(image)))
+
+    def activate_image_item(self, item):
+        """Doble clic/Enter sobre un elemento de la galería de imágenes:
+        lo muestra en el panel de imagen, activando pantalla dividida si
+        hiciera falta (si no, mostrarla no se vería en ningún lado)."""
+        if item is None:
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path or path not in self.image_paths:
+            return
+        if not self.split_mode:
+            self.toggle_split_mode()
+        self.show_image_at(self.image_paths.index(path))
 
     def show_image_at(self, index: int):
         """Carga y muestra la imagen en `index`; limpia la vista si la
@@ -1477,6 +1691,12 @@ class ModernVideoPlayer(QMainWindow):
         self.image_view.set_zoom(self.image_zoom)
         self._update_image_counter()
 
+        # Resalta en la galería el elemento que se está mostrando ahora,
+        # igual que el playlist de video marca el item actual.
+        gallery_item = self.image_items_map.get(path)
+        if gallery_item is not None:
+            self.image_gallery.setCurrentItem(gallery_item)
+
     def show_next_image(self):
         """Siguiente imagen (manual): envuelve al llegar al final."""
         count = len(self.image_paths)
@@ -1494,14 +1714,71 @@ class ModernVideoPlayer(QMainWindow):
         self.show_image_at(prev_index)
 
     def remove_current_image(self):
+        """Quita del panel Y de la galería la imagen que se está viendo."""
         if not self.image_paths or self.image_index < 0:
             self.statusBar().showMessage(
                 "No hay ninguna imagen cargada para quitar", 4000
             )
             return
-        removed_index = self.image_index
-        del self.image_paths[removed_index]
-        self.show_image_at(removed_index)
+        path = self.image_paths[self.image_index]
+        item = self.image_items_map.get(path)
+        if item is not None:
+            self._remove_image_gallery_item(item)
+        else:
+            # Salvaguarda por si el mapa quedara desincronizado: al menos
+            # se quita de la lista y se refresca la vista.
+            removed_index = self.image_index
+            del self.image_paths[removed_index]
+            self.show_image_at(removed_index)
+
+    def _remove_image_gallery_item(self, item):
+        """Quita una imagen de la galería y de la lista subyacente, sea o
+        no la que se está mostrando ahora mismo en el panel (usado por
+        remove_selected_images, el menú contextual y remove_current_image).
+        """
+        path = item.data(Qt.ItemDataRole.UserRole)
+        self.image_items_map.pop(path, None)
+        self.image_gallery.takeItem(self.image_gallery.row(item))
+
+        if path in self.image_paths:
+            removed_index = self.image_paths.index(path)
+            del self.image_paths[removed_index]
+            if removed_index == self.image_index:
+                # Era la que se estaba mostrando: se avanza a la siguiente
+                # (show_image_at ya acota el índice al nuevo tamaño).
+                self.show_image_at(removed_index)
+            elif removed_index < self.image_index:
+                # Desapareció una imagen anterior a la actual: el índice
+                # se recorre un puesto para seguir apuntando a la misma.
+                self.image_index -= 1
+                self._update_image_counter()
+            else:
+                self._update_image_counter()
+
+        self._update_image_gallery_empty_state()
+
+    def remove_selected_images(self):
+        """Botón "Quitar" de la pestaña Imágenes: quita lo seleccionado."""
+        items = self.image_gallery.selectedItems()
+        if not items:
+            self.statusBar().showMessage(
+                "Selecciona primero una o más imágenes de la galería", 4000
+            )
+            return
+        for item in items:
+            self._remove_image_gallery_item(item)
+
+    def clear_all_images(self):
+        """Botón "Quitar todo" de la pestaña Imágenes: vacía TODA la
+        colección de fotos (lista, galería y panel de vista), igual que
+        clear_all() hace con la galería de video."""
+        self.image_paths.clear()
+        self.image_items_map.clear()
+        self.image_gallery.clear()
+        self.image_index = -1
+        self.image_view.clear()
+        self._update_image_counter()
+        self._update_image_gallery_empty_state()
 
     def _update_image_counter(self):
         total = len(self.image_paths)
@@ -1513,6 +1790,10 @@ class ModernVideoPlayer(QMainWindow):
         self.image_rotation = (self.image_rotation + delta) % 360
         self.image_view.set_rotation(self.image_rotation)
         self.lbl_img_rot.setText(f"{self.image_rotation}°")
+
+    def toggle_image_flip(self):
+        """Espejo horizontal de la imagen, independiente del giro."""
+        self.image_view.set_flip_horizontal(self.btn_img_flip.isChecked())
 
     def adjust_image_zoom(self, step):
         """step positivo = acercar, negativo = alejar."""
