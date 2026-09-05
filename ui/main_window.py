@@ -77,8 +77,11 @@ class SeekSlider(QSlider):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.maximum() > self.minimum():
+            # setSliderDown() ya emite sliderPressed() internamente (Qt lo
+            # dispara al detectar el cambio de estado); emitirla también a
+            # mano la duplicaba y disparaba dos veces cualquier slot
+            # conectado a ella.
             self.setSliderDown(True)
-            self.sliderPressed.emit()
             self._apply_pos(event.position().x())
             event.accept()
             return
@@ -93,8 +96,9 @@ class SeekSlider(QSlider):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.isSliderDown():
+            # Igual que en mousePressEvent: setSliderDown(False) ya emite
+            # sliderReleased() por sí solo.
             self.setSliderDown(False)
-            self.sliderReleased.emit()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -170,10 +174,40 @@ class ModernVideoPlayer(QMainWindow):
     # Construcción de UI
     # ------------------------------------------------------------------
     def init_ui(self):
+        """Orquesta la construcción de la ventana.
+
+        Antes esto era un único método de ~260 líneas que mezclaba la
+        creación de todos los widgets (video, barra de tiempo, transporte,
+        giro/zoom/velocidad, galería) en un solo bloque de código: alta
+        complejidad ciclomática y muy difícil de mantener o testear en
+        aislado. Se dividió en un método por sección, cada uno responsable
+        de una sola parte de la interfaz.
+        """
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(splitter)
 
-        # Panel Izquierdo: Video y Controles
+        splitter.addWidget(self._build_left_panel())
+        splitter.addWidget(self._build_gallery_panel())
+        splitter.setSizes([900, 360])
+
+        # Aplicar el estado guardado de "llenar pantalla" al widget de video
+        self.video_view.set_fill_mode(self.btn_fill.isChecked())
+        self.btn_fill.setText(
+            "Llenar pantalla" if self.btn_fill.isChecked() else "Ajustar completo"
+        )
+
+        # Aplicar velocidad guardada
+        if not (0 <= self.speed_idx < len(self.speeds)):
+            self.speed_idx = self.speeds.index(1.0)
+        self.apply_speed()
+
+        # Barra de estado: feedback de errores y avisos al usuario
+        self.statusBar().showMessage(
+            "Arrastra videos o carpetas aquí, o usa 'Agregar videos'", 6000
+        )
+
+    def _build_left_panel(self) -> QWidget:
+        """Panel izquierdo: área de video + controles inferiores."""
         left_box = QWidget()
         left_layout = QVBoxLayout(left_box)
         left_layout.setContentsMargins(12, 12, 8, 12)
@@ -193,8 +227,16 @@ class ModernVideoPlayer(QMainWindow):
         controls_layout = QVBoxLayout(controls_panel)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(10)
+        controls_layout.addLayout(self._build_time_bar())
+        controls_layout.addLayout(self._build_transport_row())
+        controls_layout.addLayout(self._build_rotation_zoom_speed_row())
 
-        # Barra de Tiempo
+        self.controls_panel = controls_panel
+        left_layout.addWidget(self.controls_panel)
+        return left_box
+
+    def _build_time_bar(self) -> QHBoxLayout:
+        """Barra de tiempo: etiqueta actual, slider de progreso, etiqueta total."""
         time_bar = QHBoxLayout()
         self.lbl_current = QLabel("00:00:00")
         self.lbl_current.setObjectName("timeLabel")
@@ -211,9 +253,10 @@ class ModernVideoPlayer(QMainWindow):
         time_bar.addWidget(self.lbl_current)
         time_bar.addWidget(self.slider_pos)
         time_bar.addWidget(self.lbl_total)
-        controls_layout.addLayout(time_bar)
+        return time_bar
 
-        # Controles fila 1: transporte, volumen, bucle, pantalla completa
+    def _build_transport_row(self) -> QHBoxLayout:
+        """Fila 1: transporte, salto ±5s, volumen, bucle, pantalla completa."""
         ctrl1 = QHBoxLayout()
         ctrl1.setSpacing(6)
 
@@ -287,9 +330,10 @@ class ModernVideoPlayer(QMainWindow):
         self.btn_fs.clicked.connect(self.toggle_fullscreen)
         ctrl1.addWidget(self.btn_fs)
 
-        controls_layout.addLayout(ctrl1)
+        return ctrl1
 
-        # Controles fila 2: Rotación, Zoom y Velocidad
+    def _build_rotation_zoom_speed_row(self) -> QHBoxLayout:
+        """Fila 2: giro, zoom/relleno y velocidad de reproducción."""
         ctrl2 = QHBoxLayout()
         ctrl2.setSpacing(6)
 
@@ -379,14 +423,10 @@ class ModernVideoPlayer(QMainWindow):
         ctrl2.addWidget(btn_reset_spd)
 
         ctrl2.addStretch()
-        controls_layout.addLayout(ctrl2)
+        return ctrl2
 
-        self.controls_panel = controls_panel
-        left_layout.addWidget(self.controls_panel)
-
-        splitter.addWidget(left_box)
-
-        # Panel Derecho: Galería de Videos
+    def _build_gallery_panel(self) -> QWidget:
+        """Panel derecho: galería de videos y sus acciones."""
         right_box = QWidget()
         right_layout = QVBoxLayout(right_box)
         right_layout.setContentsMargins(8, 12, 12, 12)
@@ -420,24 +460,7 @@ class ModernVideoPlayer(QMainWindow):
         right_layout.addLayout(row_actions)
 
         self.right_panel = right_box
-        splitter.addWidget(right_box)
-        splitter.setSizes([900, 360])
-
-        # Aplicar el estado guardado de "llenar pantalla" al widget de video
-        self.video_view.set_fill_mode(self.btn_fill.isChecked())
-        self.btn_fill.setText(
-            "Llenar pantalla" if self.btn_fill.isChecked() else "Ajustar completo"
-        )
-
-        # Aplicar velocidad guardada
-        if not (0 <= self.speed_idx < len(self.speeds)):
-            self.speed_idx = self.speeds.index(1.0)
-        self.apply_speed()
-
-        # Barra de estado: feedback de errores y avisos al usuario
-        self.statusBar().showMessage(
-            "Arrastra videos o carpetas aquí, o usa 'Agregar videos'", 6000
-        )
+        return right_box
 
     def setup_shortcuts(self):
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self.toggle_play)
@@ -501,7 +524,16 @@ class ModernVideoPlayer(QMainWindow):
 
         # Liberar recursos y salir rápido: sin miniaturas pendientes.
         self.media_player.stop()
-        self.thread_pool.clear()
+        self.thread_pool.clear()  # descarta las que ni siquiera empezaron
+        # Las que ya estaban corriendo (subprocess de ffmpeg, escritura en
+        # caché) son hilos nativos de Qt: si el intérprete termina con
+        # ellas todavía vivas pueden intentar tocar objetos de la GUI ya
+        # liberados. Se les da un margen acotado para terminar solas;
+        # pasado ese tiempo se continúa con el cierre igualmente.
+        if not self.thread_pool.waitForDone(2000):
+            logger.warning(
+                "Algunas miniaturas seguían generándose al cerrar la aplicación"
+            )
 
         logger.info("Preferencias guardadas al cerrar la aplicación")
         super().closeEvent(event)
@@ -529,19 +561,38 @@ class ModernVideoPlayer(QMainWindow):
             self.settings.set_last_folder(os.path.dirname(files[0]))
             self.add_paths(files, autoplay=True)
 
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Normaliza a una forma absoluta canónica.
+
+        Sin esto, la misma película llegaba con claves distintas en
+        items_map según se soltara como ruta relativa, con "~", con
+        barras dobles o arrastrando la carpeta que la contiene vs. el
+        archivo suelto: el filtro de duplicados ("if path in
+        self.items_map") nunca la detectaba como repetida.
+        """
+        return os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+
     def add_paths(self, paths, autoplay: bool = True):
         all_files = []
-        for p in paths:
+        seen = set()
+        for raw_p in paths:
+            p = self._normalize_path(raw_p)
             if os.path.isdir(p):
                 for root, _, files in os.walk(p):
                     for f in sorted(files):
                         ext = os.path.splitext(f)[1].lower()
                         if ext in VIDEO_EXTENSIONS:
-                            all_files.append(os.path.join(root, f))
+                            full = os.path.normpath(os.path.join(root, f))
+                            if full not in seen:
+                                seen.add(full)
+                                all_files.append(full)
             elif os.path.isfile(p):
-                all_files.append(p)
+                if p not in seen:
+                    seen.add(p)
+                    all_files.append(p)
             else:
-                logger.warning("Ruta ignorada (no existe): %s", p)
+                logger.warning("Ruta ignorada (no existe): %s", raw_p)
 
         placeholder = QPixmap(130, 75)
         placeholder.fill(Qt.GlobalColor.lightGray)
@@ -842,7 +893,18 @@ class ModernVideoPlayer(QMainWindow):
 
     @staticmethod
     def fmt_time(ms):
-        s = int((ms / 1000) % 60)
-        m = int((ms / (1000 * 60)) % 60)
-        h = int((ms / (1000 * 60 * 60)))
+        """Formatea milisegundos a HH:MM:SS.
+
+        Usa aritmética entera (no float) para evitar errores de redondeo
+        en los límites de minuto/hora (p. ej. "%60" con floats podía dar
+        59.999999 en vez de 60 y mostrar "59" un instante de más) y
+        aplica max(0, ...) para que una duración/posición negativa o
+        desconocida no produzca un valor absurdo por el módulo de Python
+        con enteros negativos.
+        """
+        ms = max(0, int(ms))
+        total_s = ms // 1000
+        s = total_s % 60
+        m = (total_s // 60) % 60
+        h = total_s // 3600
         return f"{h:02d}:{m:02d}:{s:02d}"
