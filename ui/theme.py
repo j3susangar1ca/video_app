@@ -179,6 +179,15 @@ QWidget#emptyState {
     background: transparent;
 }
 
+/* Envoltorios de FlowLayout (ver ui/flow_layout.py y
+   ModernVideoPlayer._make_control_group): son contenedores puramente
+   estructurales dentro de controlsCard, no deben pintar su propio
+   fondo (heredarían el color de fondo de ventana y se verían como un
+   parche rectangular dentro de la tarjeta). */
+QWidget#controlGroup {
+    background: transparent;
+}
+
 QLabel#emptyStateTitle {
     color: $text_primary;
     font-size: 14px;
