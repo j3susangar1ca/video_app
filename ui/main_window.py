@@ -392,6 +392,13 @@ class ModernVideoPlayer(QMainWindow):
         self.video_view = DirectVideoWidget()
         self.video_view.doubleClicked.connect(self.toggle_fullscreen)
         self.video_view.clicked.connect(self.toggle_play)
+        # Un clic simple (pausar/reanudar) no dispara mouseMoveEvent si el
+        # ratón no se desplazó: en pantalla completa, con los controles ya
+        # ocultos por inactividad, un clic para pausar el video no los
+        # traía de vuelta. Había que además mover el ratón (o salir de
+        # pantalla completa) para volver a ver la barra de reproducción.
+        # Un clic también debe contar como actividad, igual que moverlo.
+        self.video_view.clicked.connect(self.on_video_mouse_moved)
         self.video_view.wheelScrolled.connect(self.adjust_volume)
         self.video_view.zoomScrolled.connect(self.adjust_zoom)
         self.video_view.mouseMoved.connect(self.on_video_mouse_moved)
