@@ -61,6 +61,13 @@ class DirectVideoWidget(QWidget):
         self._click_timer.timeout.connect(self.clicked.emit)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Sin esto, Qt solo entrega mouseMoveEvent mientras hay un botón
+        # del ratón presionado (arrastrando), NUNCA al simplemente pasar
+        # el cursor por encima sin hacer clic. mouseMoved (usada para
+        # reaparecer los controles en pantalla completa) nunca se emitía
+        # con solo mover el ratón: hacía falta clicar para que "contara"
+        # como actividad.
+        self.setMouseTracking(True)
 
     # ------------------------------------------------------------------
     # API
