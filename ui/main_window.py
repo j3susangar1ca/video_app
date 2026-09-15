@@ -126,6 +126,12 @@ IMAGE_PLACEHOLDER_TEXT = "Sin imagen cargada\nUsa 'Cargar imágenes' o arrástra
 # Tiempo sin mover el ratón antes de ocultar los controles en fullscreen.
 AUTOHIDE_CONTROLS_MS = 2500
 
+# Espera tras el último cambio en la galería antes de persistirla a disco
+# (ver _schedule_history_save). Agrupa ráfagas de cambios (p. ej. agregar
+# una carpeta con cientos de videos) en un solo guardado en vez de uno por
+# archivo.
+HISTORY_SAVE_DEBOUNCE_MS = 1200
+
 
 class SeekSlider(QSlider):
     """QSlider que salta a la posición clicada, como los players modernos.
@@ -221,6 +227,17 @@ class ModernVideoPlayer(QMainWindow):
         self._hide_controls_timer.setSingleShot(True)
         self._hide_controls_timer.timeout.connect(self._hide_fullscreen_controls)
 
+        # Antes la galería (videos e imágenes) solo se guardaba en
+        # closeEvent: si la app se cerraba mal (crash, kill -9, corte de
+        # luz) se perdía TODA la sesión y al reabrir aparecía la del cierre
+        # limpio anterior a esa, que podía ser de días atrás. Ahora se
+        # guarda también en caliente, poco después de cada cambio en la
+        # galería (ver _schedule_history_save), así una sesión que termina
+        # mal como mucho pierde el último segundo de cambios.
+        self._history_save_timer = QTimer(self)
+        self._history_save_timer.setSingleShot(True)
+        self._history_save_timer.timeout.connect(self._save_history_now)
+
         self.restore_window_state()
         self.restore_playlist()
         self.restore_images()
@@ -269,6 +286,10 @@ class ModernVideoPlayer(QMainWindow):
 
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_side_panel())
+        # Igual que controls_panel: mientras el ratón está posado sobre la
+        # galería (seleccionando un video) el auto-ocultado de pantalla
+        # completa no debe esconderla debajo del cursor. Ver eventFilter().
+        self.right_panel.installEventFilter(self)
         # Ninguno de los dos paneles es fijo: el usuario arrastra el
         # separador para ajustarlos a su gusto (ver QSplitter::handle en
         # ui/theme.py). setChildrenCollapsible(False) evita que un
@@ -783,9 +804,10 @@ class ModernVideoPlayer(QMainWindow):
         Antes solo existía la galería de video; ahora la de imágenes vive
         aquí también, en su propia pestaña, en vez de que la única forma
         de cargar/gestionar fotos fuera el panel de pantalla dividida.
-        Ambas pestañas conviven en el mismo QTabWidget (self.right_panel),
-        que es lo que se oculta/muestra al entrar y salir de pantalla
-        completa — igual que antes.
+        Ambas pestañas conviven en el mismo QTabWidget (self.right_panel):
+        en pantalla completa se oculta para dar una vista inmersiva, pero
+        reaparece con el mouse (igual que controls_panel) para poder
+        elegir otro video/imagen sin tener que salir de pantalla completa.
         """
         tabs = QTabWidget()
         tabs.addTab(self._build_video_gallery_tab(), "Videos")
@@ -1093,6 +1115,29 @@ class ModernVideoPlayer(QMainWindow):
             for i in range(self.playlist.count())
         ]
 
+    def _schedule_history_save(self):
+        """Pide guardar la galería (video + imagen) en breve.
+
+        Se llama tras cada alta/baja en cualquiera de las dos galerías. No
+        guarda al instante: reinicia un temporizador corto (ver
+        HISTORY_SAVE_DEBOUNCE_MS) para no golpear disco por cada archivo
+        individual cuando se agrega una carpeta entera de una vez.
+        """
+        self._history_save_timer.start(HISTORY_SAVE_DEBOUNCE_MS)
+
+    def _save_history_now(self):
+        """Persiste ya mismo la galería de video y de imagen.
+
+        Solo guarda lo que hace falta para no perder la sesión ante un
+        cierre anómalo (galerías + modo pantalla dividida); el resto de
+        preferencias (geometría, volumen...) se sigue guardando en
+        closeEvent, ya que un cierre limpio es el caso normal para eso.
+        """
+        self.settings.set_playlist_paths(self.current_playlist_paths())
+        self.settings.set_image_paths(self.image_paths)
+        self.settings.set_split_mode(self.split_mode)
+        self.settings.sync()
+
     def restore_images(self):
         """Reconstruye el panel de imagen con las fotos de la sesión anterior.
 
@@ -1106,6 +1151,10 @@ class ModernVideoPlayer(QMainWindow):
             logger.info("Panel de imagen restaurado: %d elemento(s)", len(self.image_paths))
 
     def closeEvent(self, event):
+        # Ya se va a guardar todo explícitamente a continuación: si había
+        # un guardado en caliente pendiente (ver _schedule_history_save),
+        # no hace falta que dispare después.
+        self._history_save_timer.stop()
         self.settings.set_window_geometry(self.saveGeometry())
         self.settings.set_volume(self.slider_vol.value())
         self.settings.set_speed_index(self.speed_idx)
@@ -1261,6 +1310,8 @@ class ModernVideoPlayer(QMainWindow):
 
         logger.info("%d archivo(s) nuevo(s) agregado(s) a la galería", len(all_files))
         self._update_gallery_empty_state()
+        if all_files:
+            self._schedule_history_save()
 
         if (
             autoplay
@@ -1393,7 +1444,20 @@ class ModernVideoPlayer(QMainWindow):
         # (ventana minimizada o panel oculto). Ahorra CPU/GPU notable.
         if self.isMinimized() or not self.video_view.isVisible():
             return
-        self.video_view.set_frame(frame.toImage())
+        # Esta señal llega decenas de veces por segundo mientras se
+        # reproduce: es, con diferencia, el slot más caliente de la app.
+        # Una excepción sin capturar dentro de un slot de Qt no se puede
+        # "resumir" (PyQt6 aborta el proceso entero al salir de este
+        # método), así que un solo frame problemático (formato de píxel
+        # raro, códec inusual...) bastaba para cerrar la app de golpe sin
+        # aviso ni forma de reproducirlo. Se captura aquí y se descarta
+        # ese frame: se pierde un fotograma, no la aplicación entera.
+        try:
+            image = frame.toImage()
+        except Exception:
+            logger.exception("Fallo convirtiendo un frame de video; se descarta")
+            return
+        self.video_view.set_frame(image)
 
     # ------------------------------------------------------------------
     # Rotación / zoom / relleno
@@ -1515,6 +1579,13 @@ class ModernVideoPlayer(QMainWindow):
             self.toggle_fullscreen()
 
     def _enter_fullscreen_ui(self):
+        # La galería empieza oculta (igual que antes) para que entrar en
+        # pantalla completa sea inmersivo desde el primer instante, pero
+        # YA NO se queda oculta todo el rato: reaparece con el mismo
+        # auto-mostrado/ocultado que los controles (ver
+        # on_video_mouse_moved / _hide_fullscreen_controls) para poder
+        # elegir otro video de la galería sin tener que salir de pantalla
+        # completa.
         self.right_panel.hide()
         self.controls_panel.show()
         self.btn_fs.setText("Salir de pantalla completa")
@@ -1533,11 +1604,14 @@ class ModernVideoPlayer(QMainWindow):
             if not self.controls_panel.isVisible():
                 self.controls_panel.show()
                 self.video_view.setCursor(Qt.CursorShape.ArrowCursor)
+            if not self.right_panel.isVisible():
+                self.right_panel.show()
             self._hide_controls_timer.start(AUTOHIDE_CONTROLS_MS)
 
     def _hide_fullscreen_controls(self):
         if self.isFullScreen():
             self.controls_panel.hide()
+            self.right_panel.hide()
             # Cursor invisible sobre el video para experiencia de cine.
             self.video_view.setCursor(Qt.CursorShape.BlankCursor)
 
@@ -1573,7 +1647,7 @@ class ModernVideoPlayer(QMainWindow):
         propios controles, estos se escondían debajo del cursor a mitad
         de una interacción.
         """
-        if obj is self.controls_panel:
+        if obj in (self.controls_panel, self.right_panel):
             if event.type() == QEvent.Type.Enter:
                 self._hide_controls_timer.stop()
             elif event.type() == QEvent.Type.Leave and self.isFullScreen():
@@ -1591,6 +1665,7 @@ class ModernVideoPlayer(QMainWindow):
         self.items_map.pop(path, None)
         self.playlist.takeItem(self.playlist.row(item))
         self._update_gallery_empty_state()
+        self._schedule_history_save()
 
     def remove_selected(self):
         items = self.playlist.selectedItems()
@@ -1607,6 +1682,7 @@ class ModernVideoPlayer(QMainWindow):
         self.items_map.clear()
         self.playlist.clear()
         self._update_gallery_empty_state()
+        self._schedule_history_save()
 
     # ------------------------------------------------------------------
     # Pantalla dividida
@@ -1667,6 +1743,7 @@ class ModernVideoPlayer(QMainWindow):
         self.image_paths.extend(added)
         logger.info("%d imagen(es) nueva(s) agregada(s) al panel de imagen", len(added))
         self._update_image_gallery_empty_state()
+        self._schedule_history_save()
 
         if show_first:
             self.show_image_at(len(self.image_paths) - len(added))
@@ -1788,6 +1865,7 @@ class ModernVideoPlayer(QMainWindow):
                 self._update_image_counter()
 
         self._update_image_gallery_empty_state()
+        self._schedule_history_save()
 
     def remove_selected_images(self):
         """Botón "Quitar" de la pestaña Imágenes: quita lo seleccionado."""
@@ -1811,6 +1889,7 @@ class ModernVideoPlayer(QMainWindow):
         self.image_view.clear()
         self._update_image_counter()
         self._update_image_gallery_empty_state()
+        self._schedule_history_save()
 
     def _update_image_counter(self):
         total = len(self.image_paths)
